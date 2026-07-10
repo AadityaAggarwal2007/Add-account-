@@ -31,6 +31,9 @@ function AutomationContent() {
   const [cronHealth, setCronHealth] = useState(null);
   const [runningNow, setRunningNow] = useState(false);
   const [runResult, setRunResult] = useState(null);
+  const [localPoller, setLocalPoller] = useState(null);
+  const [sendingReport, setSendingReport] = useState(false);
+  const [reportResult, setReportResult] = useState(null);
 
   // Paused ads state
   const [pausedAds, setPausedAds] = useState([]);
@@ -42,6 +45,7 @@ function AutomationContent() {
       const res = await fetch('/api/automation/live-evaluate');
       const data = await res.json();
       setCronHealth(data);
+      setLocalPoller(data.localPoller || null);
     } catch {}
   }, []);
 
@@ -56,14 +60,30 @@ function AutomationContent() {
       });
       const data = await res.json();
       setRunResult(data);
-      // Refresh everything after manual run
       await Promise.all([fetchData(), fetchCronHealth()]);
     } catch (e) {
       setRunResult({ error: e.message });
     }
     setRunningNow(false);
-    // Clear result after 30s (longer to read diagnostics)
     setTimeout(() => setRunResult(null), 30000);
+  };
+
+  // Send Telegram report
+  const handleSendReport = async () => {
+    setSendingReport(true);
+    setReportResult(null);
+    try {
+      const res = await fetch('/api/telegram/report', {
+        method: 'POST',
+        headers: { 'x-manual-trigger': 'true' },
+      });
+      const data = await res.json();
+      setReportResult(data.error ? { error: data.error } : { success: true });
+    } catch (e) {
+      setReportResult({ error: e.message });
+    }
+    setSendingReport(false);
+    setTimeout(() => setReportResult(null), 8000);
   };
 
   const fetchData = useCallback(async () => {
@@ -184,7 +204,7 @@ function AutomationContent() {
       {/* Cron Health Banner */}
       <div className={`rounded-xl border p-4 mb-6 ${cronBgColor}`}>
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 flex-wrap">
             {/* Status indicator */}
             <div className={`flex items-center gap-2 ${cronColor}`}>
               {cronHealth?.healthy ? (
@@ -204,6 +224,25 @@ function AutomationContent() {
               </div>
             </div>
 
+            {/* Local Poller indicator */}
+            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-semibold ${
+              localPoller?.active
+                ? 'bg-primary/10 border-primary/30 text-primary'
+                : 'bg-muted border-border text-muted-foreground'
+            }`}>
+              <span className={`w-2 h-2 rounded-full ${
+                localPoller?.active ? 'bg-primary animate-pulse' : 'bg-muted-foreground'
+              }`} />
+              <span>🖥️ Local:</span>
+              {localPoller?.active ? (
+                <span>🟢 LIVE <span className="font-normal opacity-70">({localPoller.lastPingAge})</span></span>
+              ) : localPoller?.lastPingAt ? (
+                <span>🔴 Offline <span className="font-normal opacity-70">({localPoller.lastPingAge})</span></span>
+              ) : (
+                <span>⚪ Not started</span>
+              )}
+            </div>
+
             {/* Last run stats */}
             {cronHealth?.lastResult && cronHealth.status === 'success' && (
               <div className="flex items-center gap-3 text-xs text-muted-foreground border-l border-border pl-4">
@@ -220,18 +259,45 @@ function AutomationContent() {
             )}
           </div>
 
-          {/* Run Now button */}
-          <button
-            onClick={handleRunNow}
-            disabled={runningNow}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 transition-opacity"
-          >
-            {runningNow ? (
-              <><Loader2 size={14} className="animate-spin" /> Evaluating...</>
-            ) : (
-              <><PlayCircle size={14} /> Run Now</>
-            )}
-          </button>
+          {/* Buttons */}
+          <div className="flex items-center gap-2">
+            {/* Telegram Report button */}
+            <button
+              onClick={handleSendReport}
+              disabled={sendingReport}
+              title="Send performance report to Telegram"
+              className={`flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-lg border transition-all ${
+                reportResult?.success
+                  ? 'bg-success/10 border-success/30 text-success'
+                  : reportResult?.error
+                  ? 'bg-destructive/10 border-destructive/30 text-destructive'
+                  : 'bg-card border-border text-foreground hover:bg-muted'
+              } disabled:opacity-50`}
+            >
+              {sendingReport ? (
+                <><Loader2 size={14} className="animate-spin" /> Sending...</>
+              ) : reportResult?.success ? (
+                <>✅ Sent!</>
+              ) : reportResult?.error ? (
+                <>❌ Failed</>
+              ) : (
+                <>📱 Report</>
+              )}
+            </button>
+
+            {/* Run Now button */}
+            <button
+              onClick={handleRunNow}
+              disabled={runningNow}
+              className="flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-lg bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 transition-opacity"
+            >
+              {runningNow ? (
+                <><Loader2 size={14} className="animate-spin" /> Evaluating...</>
+              ) : (
+                <><PlayCircle size={14} /> Run Now</>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Run result banner */}
