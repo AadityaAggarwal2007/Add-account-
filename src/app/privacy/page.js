@@ -7,7 +7,7 @@ export default function PrivacyPage() {
   return (
     <main style={{ maxWidth: '800px', margin: '0 auto', padding: '60px 24px', fontFamily: 'system-ui, sans-serif', color: '#1a1a1a', lineHeight: '1.7' }}>
       <h1 style={{ fontSize: '2rem', fontWeight: '700', marginBottom: '8px' }}>Privacy Policy</h1>
-      <p style={{ color: '#666', marginBottom: '40px' }}>Last updated: June 2026</p>
+      <p style={{ color: '#666', marginBottom: '40px' }}>Last updated: July 2026</p>
 
       <section style={{ marginBottom: '32px' }}>
         <h2 style={{ fontSize: '1.25rem', fontWeight: '600', marginBottom: '12px' }}>1. Overview</h2>
@@ -42,7 +42,7 @@ export default function PrivacyPage() {
 
       <section style={{ marginBottom: '32px' }}>
         <h2 style={{ fontSize: '1.25rem', fontWeight: '600', marginBottom: '12px' }}>4. Data Storage</h2>
-        <p>Your access tokens and ad account data are stored securely in our Supabase database with row-level security. Access tokens are encrypted and only used to make authorized API calls to Meta on your behalf.</p>
+        <p>Your access tokens and ad account data are stored securely in our database with row-level security. Access tokens are encrypted and only used to make authorized API calls to Meta on your behalf.</p>
       </section>
 
       <section style={{ marginBottom: '32px' }}>

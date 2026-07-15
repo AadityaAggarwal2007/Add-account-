@@ -1,6 +1,6 @@
 export const metadata = {
   title: 'Terms of Service — Add ERP',
-  description: 'Terms of Service for Add ERP Meta Ads Manager',
+  description: 'Terms of Service for AD Manager Meta Ads Manager',
 };
 
 export default function TermsPage() {
