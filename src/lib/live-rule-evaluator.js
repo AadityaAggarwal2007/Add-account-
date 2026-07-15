@@ -14,6 +14,7 @@
 //  ✓ Zero-result handling: CPR=999999 when spend>0 and results=0
 //  ✓ Full pagination — handles arbitrarily large ad counts
 //  ✓ Kill switch never resumes — permanent pause
+//  ✓ Hard rate limit — max 195 Meta API calls/hour (ban prevention)
 // =============================================================
 
 import { getSupabaseServer } from '@/lib/supabase-server';
@@ -24,7 +25,71 @@ const META_BATCH_URL = 'https://graph.facebook.com/';
 // Max ops per Meta Batch API call (Meta hard limit = 50)
 const META_BATCH_SIZE = 50;
 
-// Conversion action types — priority order
+// ── Hard rate limit: max Meta API HTTP calls per hour ───────
+const RATE_LIMIT_MAX  = 195;   // Hard ceiling — stay well under Meta's 200/hr
+const RATE_LIMIT_KEY  = 'meta_api_rate';
+const HOUR_MS         = 60 * 60 * 1000;
+
+// In-process counter for the current invocation (fast path)
+// Supabase is the source of truth across cron invocations
+let _rateSupabase = null; // set at start of each evaluateLiveRules call
+let _rateCount    = 0;    // calls made THIS invocation
+let _rateBudget   = RATE_LIMIT_MAX; // remaining budget this hour
+
+async function loadRateBudget(supabase) {
+  _rateSupabase = supabase;
+  try {
+    const { data } = await supabase
+      .from('system_settings')
+      .select('value')
+      .eq('key', RATE_LIMIT_KEY)
+      .single();
+
+    if (data?.value) {
+      const { window_start, count } = data.value;
+      const age = Date.now() - new Date(window_start).getTime();
+      if (age < HOUR_MS) {
+        // Still within the same hour window
+        _rateBudget = Math.max(0, RATE_LIMIT_MAX - (count || 0));
+        _rateCount  = 0;
+        console.log(`[RateLimit] Budget loaded: ${_rateBudget} calls remaining this hour (${count || 0} used)`);
+        return;
+      }
+    }
+    // New hour window — reset
+    _rateBudget = RATE_LIMIT_MAX;
+    _rateCount  = 0;
+    console.log(`[RateLimit] New hour window — full budget of ${RATE_LIMIT_MAX} calls`);
+  } catch {
+    // If DB read fails, assume full budget to avoid blocking
+    _rateBudget = RATE_LIMIT_MAX;
+    _rateCount  = 0;
+  }
+}
+
+async function saveRateCount(totalUsedThisHour) {
+  if (!_rateSupabase) return;
+  try {
+    await _rateSupabase.from('system_settings').upsert(
+      { key: RATE_LIMIT_KEY, value: { window_start: _rateWindowStart, count: totalUsedThisHour }, updated_at: new Date().toISOString() },
+      { onConflict: 'key' }
+    );
+  } catch { /* non-critical */ }
+}
+
+let _rateWindowStart = null;
+
+async function trackApiCall(label = '') {
+  if (_rateBudget <= 0) {
+    throw new Error(`[RateLimit] Hard limit reached (${RATE_LIMIT_MAX} calls/hr). Skipping: ${label}`);
+  }
+  _rateCount++;
+  _rateBudget--;
+  if (_rateCount % 10 === 0) {
+    console.log(`[RateLimit] ${_rateCount} calls this invocation, ${_rateBudget} remaining in hour`);
+  }
+}
+
 const CONVERSION_PRIORITY = [
   'purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase',
   'lead', 'offsite_conversion.fb_pixel_lead',
@@ -45,6 +110,15 @@ const DEFAULT_MIN_SPEND = 0.50;
 export async function evaluateLiveRules() {
   const supabase = getSupabaseServer();
   const startTime = Date.now();
+
+  // ── Load rate budget from DB (persisted across cron invocations) ──
+  _rateWindowStart = new Date().toISOString();
+  await loadRateBudget(supabase);
+
+  if (_rateBudget <= 0) {
+    console.warn(`[LiveMonitor] ⛔ Rate limit hit — skipping cycle (${RATE_LIMIT_MAX} calls/hr cap)`);
+    return { evaluated: 0, message: `Rate limit reached (${RATE_LIMIT_MAX}/hr). Resets next hour.`, rateLimited: true };
+  }
 
   // ── Load active rules (ad + ad_set scope only) ─────────────
   const { data: rules, error } = await supabase
@@ -129,6 +203,16 @@ export async function evaluateLiveRules() {
   const totalResumed = results.reduce((s, r) => s + (r.resumed || 0), 0);
   const totalSkipped = results.reduce((s, r) => s + (r.skippedMinSpend || 0), 0);
 
+  // ── Persist updated rate count back to DB ────────────────────
+  const { data: prevRate } = await supabase
+    .from('system_settings').select('value').eq('key', RATE_LIMIT_KEY).single();
+  const prevCount = prevRate?.value?.count || 0;
+  const prevWindowStart = prevRate?.value?.window_start;
+  const windowAge = prevWindowStart ? Date.now() - new Date(prevWindowStart).getTime() : HOUR_MS + 1;
+  const usedThisHour = windowAge < HOUR_MS ? prevCount + _rateCount : _rateCount;
+  await saveRateCount(usedThisHour);
+  console.log(`[RateLimit] Saved: ${usedThisHour}/${RATE_LIMIT_MAX} calls used this hour`);
+
   console.log(
     `[LiveMonitor] Done in ${elapsed}ms — ` +
     `${checkedEntities.size} unique entities evaluated across ${rules.length} rules | ` +
@@ -153,6 +237,8 @@ export async function evaluateLiveRules() {
     resumed: totalResumed,
     skipped: totalSkipped,
     elapsed_ms: elapsed,
+    api_calls_this_hour: usedThisHour,
+    api_budget_remaining: RATE_LIMIT_MAX - usedThisHour,
     diagnostics,
     results: results.map(r => ({
       rule: r.rule, ruleId: r.ruleId, scope: r.scope,
@@ -309,6 +395,7 @@ async function metaBatchAction(entities, targetStatus) {
 
         // One HTTP round trip for up to 50 operations
         const batchResults = await retryWithBackoff(async () => {
+          await trackApiCall(`batch ${targetStatus} — ${chunk.length} ops`);
           const res = await fetch(META_BATCH_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -563,6 +650,7 @@ async function fetchAllLiveInsights(accountId, accessToken, level = 'ad', period
   const allRows = [];
 
   while (url) {
+    await trackApiCall(`insights page — ${accountId} ${level} ${period}`);
     const res = await fetch(url);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -603,6 +691,7 @@ async function fetchEntityStatuses(accountId, accessToken, type = 'ads') {
   const map = {};
 
   while (url) {
+    await trackApiCall(`status page — ${accountId} ${type}`);
     const res = await fetch(url);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
