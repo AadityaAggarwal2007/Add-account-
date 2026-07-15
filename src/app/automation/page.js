@@ -31,7 +31,6 @@ function AutomationContent() {
   const [cronHealth, setCronHealth] = useState(null);
   const [runningNow, setRunningNow] = useState(false);
   const [runResult, setRunResult] = useState(null);
-  const [localPoller, setLocalPoller] = useState(null);
   const [sendingReport, setSendingReport] = useState(false);
   const [reportResult, setReportResult] = useState(null);
 
@@ -45,7 +44,6 @@ function AutomationContent() {
       const res = await fetch('/api/automation/live-evaluate');
       const data = await res.json();
       setCronHealth(data);
-      setLocalPoller(data.localPoller || null);
     } catch {}
   }, []);
 
@@ -224,24 +222,6 @@ function AutomationContent() {
               </div>
             </div>
 
-            {/* Local Poller indicator */}
-            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-semibold ${
-              localPoller?.active
-                ? 'bg-primary/10 border-primary/30 text-primary'
-                : 'bg-muted border-border text-muted-foreground'
-            }`}>
-              <span className={`w-2 h-2 rounded-full ${
-                localPoller?.active ? 'bg-primary animate-pulse' : 'bg-muted-foreground'
-              }`} />
-              <span>🖥️ Local:</span>
-              {localPoller?.active ? (
-                <span>🟢 LIVE <span className="font-normal opacity-70">({localPoller.lastPingAge})</span></span>
-              ) : localPoller?.lastPingAt ? (
-                <span>🔴 Offline <span className="font-normal opacity-70">({localPoller.lastPingAge})</span></span>
-              ) : (
-                <span>⚪ Not started</span>
-              )}
-            </div>
 
             {/* Last run stats */}
             {cronHealth?.lastResult && cronHealth.status === 'success' && (
