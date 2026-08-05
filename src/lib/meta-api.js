@@ -8,8 +8,8 @@ const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
 /**
  * Exchange OAuth code for access token
  */
-export async function exchangeCodeForToken(code) {
-  const redirectUri = `${process.env.NEXT_PUBLIC_APP_URL}/auth/meta/callback`;
+export async function exchangeCodeForToken(code, redirectUri) {
+  // redirectUri must exactly match what was sent in the OAuth dialog
 
   // Step 1: Exchange code for short-lived token
   const tokenRes = await fetch(

@@ -39,8 +39,14 @@ export async function GET(request) {
     return NextResponse.redirect(`${baseUrl}/settings?error=no_code`);
   }
 
+  // Build the exact same redirectUri that was used in the OAuth dialog
+  const host = request.headers.get('x-forwarded-host') || new URL(request.url).host;
+  const proto = request.headers.get('x-forwarded-proto') || 'https';
+  const callbackBase = `${proto}://${host}`;
+  const redirectUri = `${callbackBase}/auth/meta/callback`;
+
   try {
-    const { accessToken, expiresIn } = await exchangeCodeForToken(code);
+    const { accessToken, expiresIn } = await exchangeCodeForToken(code, redirectUri);
 
     const [accounts, pageTokens] = await Promise.all([
       fetchAdAccounts(accessToken),
