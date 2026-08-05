@@ -73,12 +73,13 @@ async function syncAccount(account, syncDays = 30) {
         await query(
           `INSERT INTO campaigns
              (meta_account_id, external_id, name, status, objective,
-              daily_budget, lifetime_budget, buying_type, start_date, end_date, updated_at)
-           VALUES ${placeholders.replace(/\)\,/g, ',updated_at=now()),').replace(/\)$/, ',updated_at=now())')}
+              daily_budget, lifetime_budget, buying_type, start_date, end_date)
+           VALUES ${placeholders}
            ON CONFLICT (external_id) DO UPDATE SET
              name = EXCLUDED.name, status = EXCLUDED.status, objective = EXCLUDED.objective,
              daily_budget = EXCLUDED.daily_budget, lifetime_budget = EXCLUDED.lifetime_budget,
-             updated_at = now()`,
+             buying_type = EXCLUDED.buying_type, start_date = EXCLUDED.start_date,
+             end_date = EXCLUDED.end_date, updated_at = now()`,
           params
         );
       }
