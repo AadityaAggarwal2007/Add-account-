@@ -1,11 +1,16 @@
 import { NextResponse } from 'next/server';
+import { headers } from 'next/headers';
 
 // Initiates Meta OAuth flow — redirects user to Facebook login
-// auth_type=rerequest → Forces Facebook to re-show ALL permissions (even if previously granted)
-// This ensures the user sees the "Which Pages?" screen and can select ALL pages
+// Redirect URI is built dynamically from request host so it always matches
+// the current domain without needing a rebuild.
 export async function GET() {
   const appId = process.env.NEXT_PUBLIC_META_APP_ID;
-  const redirectUri = `${process.env.NEXT_PUBLIC_APP_URL}/auth/meta/callback`;
+  const headersList = headers();
+  const host = headersList.get('x-forwarded-host') || headersList.get('host') || '';
+  const proto = headersList.get('x-forwarded-proto') || 'https';
+  const baseUrl = host ? `${proto}://${host}` : (process.env.NEXT_PUBLIC_APP_URL || '');
+  const redirectUri = `${baseUrl}/auth/meta/callback`;
   // ALL PERMISSIONS — grab everything
   const scope = [
     // Ads

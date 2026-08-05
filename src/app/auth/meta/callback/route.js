@@ -30,11 +30,13 @@ export async function GET(request) {
   const code = searchParams.get('code');
   const error = searchParams.get('error');
 
+  const baseUrl = new URL(request.url).origin;
+
   if (error) {
-    return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/settings?error=${encodeURIComponent(error)}`);
+    return NextResponse.redirect(`${baseUrl}/settings?error=${encodeURIComponent(error)}`);
   }
   if (!code) {
-    return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/settings?error=no_code`);
+    return NextResponse.redirect(`${baseUrl}/settings?error=no_code`);
   }
 
   try {
@@ -83,12 +85,12 @@ export async function GET(request) {
     console.log(`[OAuth] Connected: ${accounts.length} ad accounts, ${pageTokens.length} pages`);
 
     return NextResponse.redirect(
-      `${process.env.NEXT_PUBLIC_APP_URL}/settings?connected=true&accounts=${accounts.length}&pages=${pageTokens.length}`
+      `${baseUrl}/settings?connected=true&accounts=${accounts.length}&pages=${pageTokens.length}`
     );
   } catch (err) {
     console.error('Meta OAuth callback error:', err);
     return NextResponse.redirect(
-      `${process.env.NEXT_PUBLIC_APP_URL}/settings?error=${encodeURIComponent(err.message)}`
+      `${baseUrl}/settings?error=${encodeURIComponent(err.message)}`
     );
   }
 }
