@@ -80,7 +80,7 @@ export async function POST(request) {
     cookieStore.set(AUTH_COOKIE, token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      sameSite: 'lax',   // 'strict' breaks OAuth — cookies dropped on Facebook→site redirect
       path: '/',
       maxAge: 7 * 24 * 60 * 60,
     });
@@ -98,7 +98,7 @@ export async function DELETE() {
   cookieStore.set(AUTH_COOKIE, '', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    sameSite: 'lax',
     path: '/',
     maxAge: 0,
   });
