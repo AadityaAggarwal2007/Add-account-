@@ -1,16 +1,15 @@
 import { NextResponse } from 'next/server';
-import { headers } from 'next/headers';
 
 // Initiates Meta OAuth flow — redirects user to Facebook login
-// Redirect URI is built dynamically from request host so it always matches
-// the current domain without needing a rebuild.
-export async function GET() {
+// Redirect URI is built dynamically from the incoming request URL.
+export async function GET(request) {
   const appId = process.env.NEXT_PUBLIC_META_APP_ID;
-  const headersList = headers();
-  const host = headersList.get('x-forwarded-host') || headersList.get('host') || '';
-  const proto = headersList.get('x-forwarded-proto') || 'https';
-  const baseUrl = host ? `${proto}://${host}` : (process.env.NEXT_PUBLIC_APP_URL || '');
+  const reqUrl = new URL(request.url);
+  const host = request.headers.get('x-forwarded-host') || reqUrl.host;
+  const proto = request.headers.get('x-forwarded-proto') || reqUrl.protocol.replace(':', '');
+  const baseUrl = `${proto}://${host}`;
   const redirectUri = `${baseUrl}/auth/meta/callback`;
+
   // ALL PERMISSIONS — grab everything
   const scope = [
     // Ads
