@@ -6,7 +6,7 @@
 //
 // KEY OPTIMIZATIONS (scales to 5000+ ads):
 //  ✓ Meta Batch API  — 50 pause/resume ops in 1 HTTP round trip
-//  ✓ Bulk Supabase   — 1 DB call per action type instead of N
+//  ✓ Bulk pg         — 1 DB call per action type instead of N
 //  ✓ Spend filter    — insights only returns spending ads (fewer pages)
 //  ✓ Large page size — limit=1000 for status fetch (fewer round trips)
 //  ✓ Parallel accts  — all accounts fetched simultaneously
@@ -17,7 +17,7 @@
 //  ✓ Hard rate limit — max 195 Meta API calls/hour (ban prevention)
 // =============================================================
 
-import { getSupabaseServer } from '@/lib/supabase-server';
+import { query, queryOne, queryRows } from '@/lib/db';
 
 const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
 const META_BATCH_URL = 'https://graph.facebook.com/';
@@ -26,30 +26,26 @@ const META_BATCH_URL = 'https://graph.facebook.com/';
 const META_BATCH_SIZE = 50;
 
 // ── Hard rate limit: max Meta API HTTP calls per hour ───────
-const RATE_LIMIT_MAX  = 195;   // Hard ceiling — stay well under Meta's 200/hr
+const RATE_LIMIT_MAX  = 195;
 const RATE_LIMIT_KEY  = 'meta_api_rate';
 const HOUR_MS         = 60 * 60 * 1000;
 
-// In-process counter for the current invocation (fast path)
-// Supabase is the source of truth across cron invocations
-let _rateSupabase = null; // set at start of each evaluateLiveRules call
-let _rateCount    = 0;    // calls made THIS invocation
-let _rateBudget   = RATE_LIMIT_MAX; // remaining budget this hour
+// In-process counter for the current invocation
+let _rateCount    = 0;
+let _rateBudget   = RATE_LIMIT_MAX;
+let _rateWindowStart = null;
 
-async function loadRateBudget(supabase) {
-  _rateSupabase = supabase;
+async function loadRateBudget() {
   try {
-    const { data } = await supabase
-      .from('system_settings')
-      .select('value')
-      .eq('key', RATE_LIMIT_KEY)
-      .single();
+    const row = await queryOne(
+      `SELECT value FROM system_settings WHERE key = $1`,
+      [RATE_LIMIT_KEY]
+    );
 
-    if (data?.value) {
-      const { window_start, count } = data.value;
+    if (row?.value) {
+      const { window_start, count } = row.value;
       const age = Date.now() - new Date(window_start).getTime();
       if (age < HOUR_MS) {
-        // Still within the same hour window
         _rateBudget = Math.max(0, RATE_LIMIT_MAX - (count || 0));
         _rateCount  = 0;
         console.log(`[RateLimit] Budget loaded: ${_rateBudget} calls remaining this hour (${count || 0} used)`);
@@ -61,23 +57,22 @@ async function loadRateBudget(supabase) {
     _rateCount  = 0;
     console.log(`[RateLimit] New hour window — full budget of ${RATE_LIMIT_MAX} calls`);
   } catch {
-    // If DB read fails, assume full budget to avoid blocking
     _rateBudget = RATE_LIMIT_MAX;
     _rateCount  = 0;
   }
 }
 
 async function saveRateCount(totalUsedThisHour) {
-  if (!_rateSupabase) return;
   try {
-    await _rateSupabase.from('system_settings').upsert(
-      { key: RATE_LIMIT_KEY, value: { window_start: _rateWindowStart, count: totalUsedThisHour }, updated_at: new Date().toISOString() },
-      { onConflict: 'key' }
+    await query(
+      `INSERT INTO system_settings (key, value, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (key) DO UPDATE
+         SET value = $2, updated_at = now()`,
+      [RATE_LIMIT_KEY, JSON.stringify({ window_start: _rateWindowStart, count: totalUsedThisHour })]
     );
   } catch { /* non-critical */ }
 }
-
-let _rateWindowStart = null;
 
 async function trackApiCall(label = '') {
   if (_rateBudget <= 0) {
@@ -99,7 +94,6 @@ const CONVERSION_PRIORITY = [
   'onsite_conversion.messaging_conversation_started_7d',
 ];
 
-// Minimum spend before a rule can fire on an entity
 const DEFAULT_MIN_SPEND = 0.50;
 
 
@@ -108,48 +102,46 @@ const DEFAULT_MIN_SPEND = 0.50;
 // =============================================================
 
 export async function evaluateLiveRules() {
-  const supabase = getSupabaseServer();
   const startTime = Date.now();
 
-  // ── Load rate budget from DB (persisted across cron invocations) ──
   _rateWindowStart = new Date().toISOString();
-  await loadRateBudget(supabase);
+  await loadRateBudget();
 
   if (_rateBudget <= 0) {
     console.warn(`[LiveMonitor] ⛔ Rate limit hit — skipping cycle (${RATE_LIMIT_MAX} calls/hr cap)`);
     return { evaluated: 0, message: `Rate limit reached (${RATE_LIMIT_MAX}/hr). Resets next hour.`, rateLimited: true };
   }
 
-  // ── Load active rules (ad + ad_set scope only) ─────────────
-  const { data: rules, error } = await supabase
-    .from('automation_rules')
-    .select('*')
-    .eq('is_active', true)
-    .in('scope', ['ad', 'ad_set']);
+  // Load active rules (ad + ad_set scope only)
+  const rules = await queryRows(
+    `SELECT * FROM automation_rules
+     WHERE is_active = true AND scope = ANY($1::text[])
+     ORDER BY created_at ASC`,
+    [['ad', 'ad_set']]
+  );
 
-  if (error) throw error;
-  if (!rules?.length) return { evaluated: 0, message: 'No active ad/ad-set rules' };
+  if (!rules.length) return { evaluated: 0, message: 'No active ad/ad-set rules' };
 
-  // ── Get all accounts with tokens ───────────────────────────
-  const { data: accounts } = await supabase
-    .from('meta_accounts')
-    .select('id, meta_account_id, access_token, name')
-    .eq('is_active', true);
+  // Get all accounts with tokens
+  const accounts = await queryRows(
+    `SELECT id, meta_account_id, access_token, name
+     FROM meta_accounts
+     WHERE is_active = true`
+  );
 
-  if (!accounts?.length) return { evaluated: 0, message: 'No active accounts' };
+  if (!accounts.length) return { evaluated: 0, message: 'No active accounts' };
 
-  // ── Load currently auto-paused entities ────────────────────
-  const { data: pausedEntities } = await supabase
-    .from('automation_paused_ads')
-    .select('*')
-    .eq('is_paused', true);
+  // Load currently auto-paused entities
+  const pausedEntities = await queryRows(
+    `SELECT * FROM automation_paused_ads WHERE is_paused = true`
+  );
 
   const pausedMap = {};
-  for (const p of (pausedEntities || [])) {
+  for (const p of pausedEntities) {
     pausedMap[p.ad_external_id] = p;
   }
 
-  // ── Cache for live data fetches by scope and period ────────
+  // Cache for live data fetches by scope and period
   const liveDataCache = {};
   const checkedEntities = new Set();
 
@@ -177,7 +169,7 @@ export async function evaluateLiveRules() {
     return dataMap;
   }
 
-  // ── Evaluate each rule ─────────────────────────────────────
+  // Evaluate each rule
   const results = [];
 
   for (const rule of rules) {
@@ -185,12 +177,11 @@ export async function evaluateLiveRules() {
       const period = rule.conditions?.[0]?.period || 'today';
       const dataMap = await getLiveDataForScopeAndPeriod(rule.scope, period);
 
-      // Record which entities were checked
       for (const entityId of Object.keys(dataMap)) {
         checkedEntities.add(`${rule.scope}_${entityId}`);
       }
 
-      const ruleResults = await evaluateRuleAgainstLiveData(supabase, rule, dataMap, pausedMap);
+      const ruleResults = await evaluateRuleAgainstLiveData(rule, dataMap, pausedMap);
       results.push({ rule: rule.name, ruleId: rule.id, scope: rule.scope, ...ruleResults });
     } catch (err) {
       console.error(`[LiveMonitor] Rule "${rule.name}" error:`, err.message);
@@ -203,9 +194,11 @@ export async function evaluateLiveRules() {
   const totalResumed = results.reduce((s, r) => s + (r.resumed || 0), 0);
   const totalSkipped = results.reduce((s, r) => s + (r.skippedMinSpend || 0), 0);
 
-  // ── Persist updated rate count back to DB ────────────────────
-  const { data: prevRate } = await supabase
-    .from('system_settings').select('value').eq('key', RATE_LIMIT_KEY).single();
+  // Persist updated rate count back to DB
+  const prevRate = await queryOne(
+    `SELECT value FROM system_settings WHERE key = $1`,
+    [RATE_LIMIT_KEY]
+  );
   const prevCount = prevRate?.value?.count || 0;
   const prevWindowStart = prevRate?.value?.window_start;
   const windowAge = prevWindowStart ? Date.now() - new Date(prevWindowStart).getTime() : HOUR_MS + 1;
@@ -254,7 +247,7 @@ export async function evaluateLiveRules() {
 // RULE EVALUATION — Classify then Batch Act
 // =============================================================
 
-async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) {
+async function evaluateRuleAgainstLiveData(rule, liveData, pausedMap) {
   let paused = 0, resumed = 0, skippedMinSpend = 0;
   let checked = 0, skippedNotActive = 0;
   const breachingAds = [];
@@ -266,7 +259,7 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
   const minSpend    = parseFloat(rule.min_spend_threshold) || DEFAULT_MIN_SPEND;
   const isKillSwitch = rule.action_type === 'kill_switch';
 
-  // ── PASS 1: Classify every entity — pure CPU, no I/O ──────
+  // PASS 1: Classify every entity — pure CPU, no I/O
   const toPause  = [];
   const toResume = [];
 
@@ -276,11 +269,6 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
     checked++;
     const isPausedByUs = !!pausedMap[entityId];
 
-    // ── MIN SPEND GUARD ──────────────────────────────────────────────────────
-    // Skip low-spend ads to avoid false positives on brand new ads.
-    // EXCEPTION: if spend > $0 AND results = 0 → always evaluate.
-    //   "Spent any money, got zero conversions" must ALWAYS trigger — regardless
-    //   of spend amount. The min-spend guard was blocking these exact ads.
     const spendingWithZeroResults = entity.spend > 0 && entity.results === 0;
     if (entity.spend < minSpend && !isPausedByUs && !spendingWithZeroResults) {
       skippedMinSpend++;
@@ -304,19 +292,20 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
     }
   }
 
-  // ── PASS 2: Batch PAUSE via Meta Batch API ─────────────────
-  // Meta Batch API: 50 ops per HTTP call — far fewer round trips than individual calls
+  // PASS 2: Batch PAUSE via Meta Batch API
   if (toPause.length > 0) {
     const { succeeded: pauseOk, failed: pauseFail } = await metaBatchAction(toPause, 'PAUSED');
 
-    // Bulk save all tracking + logs in 3 DB calls (not N×4)
     if (pauseOk.length > 0) {
-      await bulkSavePauses(supabase, rule, pauseOk, isKillSwitch);
+      await bulkSavePauses(rule, pauseOk, isKillSwitch);
       paused = pauseOk.length;
 
-      await supabase.from('automation_rules')
-        .update({ trigger_count: (rule.trigger_count || 0) + paused, last_triggered_at: new Date().toISOString() })
-        .eq('id', rule.id);
+      await query(
+        `UPDATE automation_rules
+         SET trigger_count = $1, last_triggered_at = now()
+         WHERE id = $2`,
+        [(rule.trigger_count || 0) + paused, rule.id]
+      );
 
       console.log(`[LiveMonitor] ⏸️  PAUSED ${paused} ${rule.scope}s via Batch API`);
     }
@@ -324,10 +313,16 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
     for (const { entityId, entity, error } of pauseFail) {
       failedPauses.push({ id: entityId, name: entity.entityName, error });
       try {
-        await supabase.from('automation_logs').insert(buildLogRow(rule, entityId, entity, 'failed', error));
+        await query(
+          `INSERT INTO automation_logs
+             (rule_id, rule_name, entity_type, entity_id, entity_external_id, entity_name,
+              action_type, action_params, condition_snapshot, status, error_message)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          [rule.id, rule.name, rule.scope, null, entityId, entity.entityName,
+           'pause_ad', '{}', JSON.stringify(buildSnapshot(entity)), 'failed', error]
+        );
       } catch {}
-      // If the ad no longer exists on Meta (deleted), remove it from paused tracking
-      // so we stop retrying it on every cron run
+
       const isDeleted = error && (
         error.includes('does not exist') ||
         error.includes('cannot be loaded due to missing permissions') ||
@@ -335,21 +330,22 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
       );
       if (isDeleted) {
         try {
-          await supabase.from('automation_paused_ads')
-            .delete()
-            .eq('ad_external_id', entityId);
+          await query(
+            `DELETE FROM automation_paused_ads WHERE ad_external_id = $1`,
+            [entityId]
+          );
           console.log(`[LiveMonitor] Removed deleted/inaccessible ad from tracking: ${entityId}`);
         } catch {}
       }
     }
   }
 
-  // ── PASS 3: Batch RESUME via Meta Batch API ────────────────
+  // PASS 3: Batch RESUME via Meta Batch API
   if (toResume.length > 0) {
     const { succeeded: resumeOk } = await metaBatchAction(toResume, 'ACTIVE');
 
     if (resumeOk.length > 0) {
-      await bulkSaveResumes(supabase, rule, resumeOk);
+      await bulkSaveResumes(rule, resumeOk);
       resumed = resumeOk.length;
       console.log(`[LiveMonitor] ▶️  RESUMED ${resumed} ${rule.scope}s via Batch API`);
     }
@@ -363,15 +359,7 @@ async function evaluateRuleAgainstLiveData(supabase, rule, liveData, pausedMap) 
 // META BATCH API — Up to 50 ops in 1 HTTP call
 // =============================================================
 
-/**
- * Pause or enable a list of entities using Meta Graph Batch API.
- * Groups by access token (different accounts have different tokens).
- * Sends up to 50 operations per HTTP call instead of 1 per call.
- *
- * Speedup: 500 ops = 10 HTTP calls instead of 500 individual calls.
- */
 async function metaBatchAction(entities, targetStatus) {
-  // Group by access token — each account needs its own token
   const byToken = new Map();
   for (const { entityId, entity } of entities) {
     if (!byToken.has(entity.accessToken)) byToken.set(entity.accessToken, []);
@@ -382,7 +370,6 @@ async function metaBatchAction(entities, targetStatus) {
   const failed    = [];
 
   for (const [token, group] of byToken) {
-    // Process in chunks of META_BATCH_SIZE (50)
     for (let i = 0; i < group.length; i += META_BATCH_SIZE) {
       const chunk = group.slice(i, i + META_BATCH_SIZE);
 
@@ -393,7 +380,6 @@ async function metaBatchAction(entities, targetStatus) {
           body: `status=${targetStatus}`,
         }));
 
-        // One HTTP round trip for up to 50 operations
         const batchResults = await retryWithBackoff(async () => {
           await trackApiCall(`batch ${targetStatus} — ${chunk.length} ops`);
           const res = await fetch(META_BATCH_URL, {
@@ -407,7 +393,6 @@ async function metaBatchAction(entities, targetStatus) {
           return data;
         });
 
-        // Classify each result
         for (let j = 0; j < chunk.length; j++) {
           const { entityId, entity } = chunk[j];
           const result = batchResults[j];
@@ -425,7 +410,6 @@ async function metaBatchAction(entities, targetStatus) {
           }
         }
       } catch (err) {
-        // Entire chunk failed (network/auth error)
         console.error(`[LiveMonitor] Batch chunk failed:`, err.message);
         for (const { entityId, entity } of chunk) {
           failed.push({ entityId, entity, error: err.message });
@@ -439,72 +423,124 @@ async function metaBatchAction(entities, targetStatus) {
 
 
 // =============================================================
-// BULK SUPABASE OPERATIONS — 3 DB calls per action type, not N×4
+// BULK POSTGRESQL OPERATIONS — 3 DB calls per action type, not N×4
+// Uses ANY($1::text[]) for bulk WHERE clauses
 // =============================================================
 
-async function bulkSavePauses(supabase, rule, entities, isKillSwitch) {
+async function bulkSavePauses(rule, entities, isKillSwitch) {
   const now = new Date().toISOString();
-  const ids  = entities.map(e => e.entityId);
+  const ids = entities.map(e => e.entityId);
 
   // 1. Remove stale rows for these entities
-  await supabase.from('automation_paused_ads').delete().in('ad_external_id', ids);
+  await query(
+    `DELETE FROM automation_paused_ads WHERE ad_external_id = ANY($1::text[])`,
+    [ids]
+  );
 
   // 2. Bulk insert paused tracking
-  await supabase.from('automation_paused_ads').insert(
-    entities.map(({ entityId, entity }) => ({
-      ad_external_id:  entityId,
-      ad_name:         entity.entityName,
-      rule_id:         rule.id,
-      rule_name:       rule.name,
-      reason:          isKillSwitch ? 'kill_switch' : 'threshold',
-      metric_snapshot: buildSnapshot(entity),
-      paused_at:       now,
-      resumed_at:      null,
-      is_paused:       true,
-    }))
+  const pauseValues = entities.map(({ entityId, entity }) => ({
+    ad_external_id: entityId,
+    ad_name: entity.entityName,
+    rule_id: rule.id,
+    rule_name: rule.name,
+    reason: isKillSwitch ? 'kill_switch' : 'threshold',
+    metric_snapshot: JSON.stringify(buildSnapshot(entity)),
+    paused_at: now,
+    is_paused: true,
+  }));
+
+  // Build parameterized bulk INSERT
+  const pausePlaceholders = pauseValues.map((_, i) => {
+    const base = i * 8;
+    return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8})`;
+  }).join(',');
+  const pauseParams = pauseValues.flatMap(v => [
+    v.ad_external_id, v.ad_name, v.rule_id, v.rule_name,
+    v.reason, v.metric_snapshot, v.paused_at, v.is_paused,
+  ]);
+
+  await query(
+    `INSERT INTO automation_paused_ads
+       (ad_external_id, ad_name, rule_id, rule_name, reason, metric_snapshot, paused_at, is_paused)
+     VALUES ${pausePlaceholders}`,
+    pauseParams
   );
 
   // 3. Bulk insert automation logs
-  await supabase.from('automation_logs').insert(
-    entities.map(({ entityId, entity }) => buildLogRow(rule, entityId, entity, 'executed'))
-  );
+  const logValues = entities.map(({ entityId, entity }) => buildLogRow(rule, entityId, entity, 'executed'));
+  await bulkInsertLogs(logValues);
 
   // 4. Bulk insert notifications
-  await supabase.from('notifications').insert(
-    entities.map(({ entityId, entity }) => ({
-      type:     'automation_fired',
-      title:    `⏸️ Auto-Paused: ${entity.entityName}`,
-      message:  buildNotificationMessage(rule, entity),
-      severity: 'warning',
-      metadata: { rule_id: rule.id, entity_id: entityId, action: 'paused' },
-    }))
+  const notifValues = entities.map(({ entityId, entity }) => ({
+    type: 'automation_fired',
+    title: `⏸️ Auto-Paused: ${entity.entityName}`,
+    message: buildNotificationMessage(rule, entity),
+    severity: 'warning',
+    metadata: JSON.stringify({ rule_id: rule.id, entity_id: entityId, action: 'paused' }),
+  }));
+  await bulkInsertNotifications(notifValues);
+}
+
+async function bulkSaveResumes(rule, entities) {
+  const now = new Date().toISOString();
+  const ids = entities.map(e => e.entityId);
+
+  // 1. Mark as resumed in bulk
+  await query(
+    `UPDATE automation_paused_ads
+     SET is_paused = false, resumed_at = $1
+     WHERE ad_external_id = ANY($2::text[]) AND is_paused = true`,
+    [now, ids]
+  );
+
+  // 2. Bulk insert logs
+  const logValues = entities.map(({ entityId, entity }) => buildLogRow(rule, entityId, entity, 'executed', null, 'enable_ad'));
+  await bulkInsertLogs(logValues);
+
+  // 3. Bulk insert notifications
+  const notifValues = entities.map(({ entityId, entity }) => ({
+    type: 'automation_fired',
+    title: `▶️ Auto-Resumed: ${entity.entityName}`,
+    message: buildNotificationMessage(rule, entity),
+    severity: 'info',
+    metadata: JSON.stringify({ rule_id: rule.id, entity_id: entityId, action: 'resumed' }),
+  }));
+  await bulkInsertNotifications(notifValues);
+}
+
+async function bulkInsertLogs(logValues) {
+  if (!logValues.length) return;
+  const placeholders = logValues.map((_, i) => {
+    const base = i * 9;
+    return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9})`;
+  }).join(',');
+  const params = logValues.flatMap(v => [
+    v.rule_id, v.rule_name, v.entity_type, v.entity_id,
+    v.entity_external_id, v.entity_name, v.action_type,
+    v.condition_snapshot, v.status,
+  ]);
+  await query(
+    `INSERT INTO automation_logs
+       (rule_id, rule_name, entity_type, entity_id, entity_external_id,
+        entity_name, action_type, condition_snapshot, status)
+     VALUES ${placeholders}`,
+    params
   );
 }
 
-async function bulkSaveResumes(supabase, rule, entities) {
-  const now = new Date().toISOString();
-  const ids  = entities.map(e => e.entityId);
-
-  // 1. Mark as resumed in bulk
-  await supabase.from('automation_paused_ads')
-    .update({ is_paused: false, resumed_at: now })
-    .in('ad_external_id', ids)
-    .eq('is_paused', true);
-
-  // 2. Bulk insert logs
-  await supabase.from('automation_logs').insert(
-    entities.map(({ entityId, entity }) => buildLogRow(rule, entityId, entity, 'executed', null, 'enable_ad'))
-  );
-
-  // 3. Bulk insert notifications
-  await supabase.from('notifications').insert(
-    entities.map(({ entityId, entity }) => ({
-      type:     'automation_fired',
-      title:    `▶️ Auto-Resumed: ${entity.entityName}`,
-      message:  buildNotificationMessage(rule, entity),
-      severity: 'info',
-      metadata: { rule_id: rule.id, entity_id: entityId, action: 'resumed' },
-    }))
+async function bulkInsertNotifications(notifValues) {
+  if (!notifValues.length) return;
+  const placeholders = notifValues.map((_, i) => {
+    const base = i * 5;
+    return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5})`;
+  }).join(',');
+  const params = notifValues.flatMap(v => [
+    v.type, v.title, v.message, v.severity, v.metadata,
+  ]);
+  await query(
+    `INSERT INTO notifications (type, title, message, severity, metadata)
+     VALUES ${placeholders}`,
+    params
   );
 }
 
@@ -530,13 +566,13 @@ function getMetricValue(entity, metric) {
 function evaluateCondition(actual, operator, expected) {
   if (isNaN(actual) || isNaN(expected)) return false;
   switch (operator) {
-    case '>':           return actual >  expected;
-    case '<':           return actual <  expected;
-    case '>=':          return actual >= expected;
-    case '<=':          return actual <= expected;
+    case '>':            return actual >  expected;
+    case '<':            return actual <  expected;
+    case '>=':           return actual >= expected;
+    case '<=':           return actual <= expected;
     case '=': case '==': return actual === expected;
-    case '!=':          return actual !== expected;
-    default:            return false;
+    case '!=':           return actual !== expected;
+    default:             return false;
   }
 }
 
@@ -561,13 +597,9 @@ async function retryWithBackoff(fn, maxRetries = 3) {
 
 // =============================================================
 // META API — Full pagination data fetchers
+// (unchanged — these call Meta API, not the database)
 // =============================================================
 
-/**
- * Merge insights + statuses into a single data map.
- * Insights: ads that spent money today.
- * Statuses: ALL active/paused ads (for resume check on zero-spend ads).
- */
 function mergeInsightsAndStatuses(insights, statuses, dataMap, account) {
   for (const item of insights) {
     dataMap[item.entityId] = {
@@ -578,8 +610,6 @@ function mergeInsightsAndStatuses(insights, statuses, dataMap, account) {
     };
   }
 
-  // Add zero-spend entities (exist in status but not in insights today)
-  // Critical for resume logic: we need to evaluate paused ads even if they spent $0
   for (const [entityId, info] of Object.entries(statuses)) {
     if (!dataMap[entityId]) {
       dataMap[entityId] = {
@@ -594,9 +624,6 @@ function mergeInsightsAndStatuses(insights, statuses, dataMap, account) {
   }
 }
 
-/**
- * Helper to calculate start and end dates for a given period in IST.
- */
 function getDateRangeForPeriod(period) {
   const now = new Date();
   const istMs = now.getTime() + (5.5 * 60 * 60 * 1000);
@@ -605,7 +632,7 @@ function getDateRangeForPeriod(period) {
   if (period === 'today') {
     return { since: todayStr, until: todayStr };
   }
-  
+
   if (period === 'yesterday') {
     const yesterday = new Date(istMs - (24 * 60 * 60 * 1000)).toISOString().split('T')[0];
     return { since: yesterday, until: yesterday };
@@ -621,10 +648,6 @@ function getDateRangeForPeriod(period) {
   return { since: sinceDate, until: todayStr };
 }
 
-/**
- * Fetch insights for a given level and period — ONLY for entities with spend > 0.
- * The spend filter dramatically reduces pages fetched for large accounts.
- */
 async function fetchAllLiveInsights(accountId, accessToken, level = 'ad', period = 'today') {
   const { since, until } = getDateRangeForPeriod(period);
 
@@ -634,7 +657,6 @@ async function fetchAllLiveInsights(accountId, accessToken, level = 'ad', period
   const fields    = `${idField},${nameField},spend,impressions,clicks,actions`;
   const timeRange = encodeURIComponent(JSON.stringify({ since, until }));
 
-  // SPEND FILTER: only fetch entities that have spent money in the period.
   const spendFilter = encodeURIComponent(
     JSON.stringify([{ field: 'spend', operator: 'GREATER_THAN', value: '0' }])
   );
@@ -670,19 +692,12 @@ async function fetchAllLiveInsights(accountId, accessToken, level = 'ad', period
     const cpc = clicks      > 0 ? +(spend / clicks).toFixed(4)              : 0;
     const ctr = impressions > 0 ? +((clicks / impressions) * 100).toFixed(4) : 0;
     const cpm = impressions > 0 ? +((spend / impressions) * 1000).toFixed(4) : 0;
-
-    // CPR: If spending but 0 results → 999999 (triggers "cpr > X" rules correctly)
-    // If 0 spend → 0 (won't trigger any rule, handled by min_spend guard)
     const cpr = results > 0 ? +(spend / results).toFixed(2) : (spend > 0 ? 999999 : 0);
 
     return { entityId: row[idField], entityName: row[nameField], spend, impressions, clicks, results, cpc, ctr, cpm, cpr };
   });
 }
 
-/**
- * Fetch all entity statuses — FULL PAGINATION with limit=1000.
- * Larger limit = fewer round trips for large ad counts.
- */
 async function fetchEntityStatuses(accountId, accessToken, type = 'ads') {
   const statusFilter = encodeURIComponent(
     JSON.stringify([{ field: 'effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED'] }])
@@ -696,7 +711,7 @@ async function fetchEntityStatuses(accountId, accessToken, type = 'ads') {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       console.error(`[LiveMonitor] fetchEntityStatuses failed for ${type}: ${res.status}`, err);
-      return map; // Don't crash on status fetch failure — degrade gracefully
+      return map;
     }
     const json = await res.json();
     for (const entity of (json.data || [])) {
@@ -740,10 +755,8 @@ function buildLogRow(rule, entityId, entity, status, errorMessage = null, action
     entity_external_id: entityId,
     entity_name:        entity.entityName,
     action_type:        actionType || (status === 'executed' ? 'pause_ad' : rule.action_type),
-    action_params:      {},
-    condition_snapshot: buildSnapshot(entity),
+    condition_snapshot: JSON.stringify(buildSnapshot(entity)),
     status,
-    error_message:      errorMessage,
   };
 }
 

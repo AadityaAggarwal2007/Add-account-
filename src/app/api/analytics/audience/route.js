@@ -1,36 +1,24 @@
 import { NextResponse } from 'next/server';
-import { getSupabaseServer } from '@/lib/supabase-server';
+import { queryRows } from '@/lib/db';
 
 const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
 
 // GET /api/analytics/audience?account=UUID&from=&to=
-// Returns demographic breakdowns from Meta Insights API
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const accountId = searchParams.get('account');
   const dateFrom = searchParams.get('from');
   const dateTo = searchParams.get('to');
 
-  const supabase = getSupabaseServer();
-
   try {
-    // Get account(s)
-    let accounts;
-    if (accountId && accountId !== 'all') {
-      const { data } = await supabase.from('meta_accounts').select('*').eq('id', accountId).eq('is_active', true);
-      accounts = data;
-    } else {
-      const { data } = await supabase.from('meta_accounts').select('*').eq('is_active', true);
-      accounts = data;
-    }
+    const accounts = accountId && accountId !== 'all'
+      ? await queryRows(`SELECT * FROM meta_accounts WHERE id = $1 AND is_active = true`, [accountId])
+      : await queryRows(`SELECT * FROM meta_accounts WHERE is_active = true`);
 
-    if (!accounts?.length) return NextResponse.json({ error: 'No accounts found' }, { status: 404 });
+    if (!accounts.length) return NextResponse.json({ error: 'No accounts found' }, { status: 404 });
 
-    const allAgeGender = {};
-    const allCountry = {};
-    const allDevice = {};
+    const allAgeGender = {}, allCountry = {}, allDevice = {};
 
-    // Fetch ALL breakdowns for ALL accounts in parallel (maximum speed)
     const accountResults = await Promise.all(accounts.map(async (account) => {
       const [ageGenderData, countryData, deviceData] = await Promise.all([
         fetchBreakdown(account.meta_account_id, account.access_token, dateFrom, dateTo, 'age,gender').catch(() => []),

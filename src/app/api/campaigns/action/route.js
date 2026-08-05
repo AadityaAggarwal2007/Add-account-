@@ -1,33 +1,27 @@
 import { NextResponse } from 'next/server';
-import { getSupabaseServer } from '@/lib/supabase-server';
+import { queryOne, query } from '@/lib/db';
 import { pauseCampaign, enableCampaign, updateBudget } from '@/lib/meta-api';
 
 // POST /api/campaigns/action — Quick actions on campaigns
 export async function POST(request) {
   const { campaignId, action, value } = await request.json();
-  // campaignId = internal UUID, action = 'pause' | 'enable' | 'set_budget'
 
   if (!campaignId || !action) {
     return NextResponse.json({ error: 'campaignId and action required' }, { status: 400 });
   }
 
-  const supabase = getSupabaseServer();
-
   try {
-    // Get campaign + account info
-    const { data: campaign } = await supabase
-      .from('campaigns')
-      .select('id, external_id, name, status, meta_account_id')
-      .eq('id', campaignId)
-      .single();
+    const campaign = await queryOne(
+      `SELECT id, external_id, name, status, meta_account_id FROM campaigns WHERE id = $1`,
+      [campaignId]
+    );
 
     if (!campaign) return NextResponse.json({ error: 'Campaign not found' }, { status: 404 });
 
-    const { data: account } = await supabase
-      .from('meta_accounts')
-      .select('access_token')
-      .eq('id', campaign.meta_account_id)
-      .single();
+    const account = await queryOne(
+      `SELECT access_token FROM meta_accounts WHERE id = $1`,
+      [campaign.meta_account_id]
+    );
 
     if (!account?.access_token) return NextResponse.json({ error: 'No access token' }, { status: 400 });
 
@@ -46,24 +40,29 @@ export async function POST(request) {
       case 'set_budget':
         if (!value || value <= 0) return NextResponse.json({ error: 'Invalid budget value' }, { status: 400 });
         result = await updateBudget(campaign.external_id, value, account.access_token);
-        await supabase.from('campaigns').update({ daily_budget: value }).eq('id', campaignId);
+        await query(`UPDATE campaigns SET daily_budget = $1 WHERE id = $2`, [value, campaignId]);
         break;
       default:
         return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
     }
 
-    // Update local status
     if (action !== 'set_budget') {
-      await supabase.from('campaigns').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('id', campaignId);
+      await query(
+        `UPDATE campaigns SET status = $1, updated_at = now() WHERE id = $2`,
+        [newStatus, campaignId]
+      );
     }
 
-    // Log notification
-    await supabase.from('notifications').insert({
-      type: 'automation_fired',
-      title: `${action === 'pause' ? '⏸️ Paused' : action === 'enable' ? '▶️ Enabled' : '💰 Budget updated'}: ${campaign.name}`,
-      message: action === 'set_budget' ? `Budget set to $${value}` : `Campaign ${newStatus}`,
-      severity: 'info',
-    });
+    await query(
+      `INSERT INTO notifications (type, title, message, severity)
+       VALUES ($1,$2,$3,$4)`,
+      [
+        'automation_fired',
+        `${action === 'pause' ? '⏸️ Paused' : action === 'enable' ? '▶️ Enabled' : '💰 Budget updated'}: ${campaign.name}`,
+        action === 'set_budget' ? `Budget set to $${value}` : `Campaign ${newStatus}`,
+        'info',
+      ]
+    );
 
     return NextResponse.json({ success: true, status: newStatus, result });
   } catch (err) {

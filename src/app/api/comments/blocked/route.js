@@ -1,15 +1,12 @@
 import { NextResponse } from 'next/server';
-import { getSupabaseServer } from '@/lib/supabase-server';
+import { queryRows } from '@/lib/db';
 
 export async function GET() {
-  const supabase = getSupabaseServer();
   try {
-    const { data: blocked, error } = await supabase
-      .from('blocked_accounts')
-      .select('*')
-      .order('blocked_at', { ascending: false });
-    if (error) throw error;
-    return NextResponse.json({ blocked: blocked || [] });
+    const blocked = await queryRows(
+      `SELECT * FROM blocked_accounts ORDER BY blocked_at DESC`
+    );
+    return NextResponse.json({ blocked });
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }

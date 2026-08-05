@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getSupabaseServer } from '@/lib/supabase-server';
+import { queryRows, queryOne } from '@/lib/db';
 import { fetchPeriodReach } from '@/lib/meta-api';
 
 // GET /api/analytics/overview — Advanced KPI + Chart data
@@ -7,7 +7,6 @@ import { fetchPeriodReach } from '@/lib/meta-api';
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
 
-  // --- Parse date range ---
   let dateFrom, dateTo;
   if (searchParams.get('from') && searchParams.get('to')) {
     dateFrom = searchParams.get('from');
@@ -22,16 +21,15 @@ export async function GET(request) {
   const compareMode = searchParams.get('compare') || 'previous';
   const breakdown = searchParams.get('breakdown') || 'day';
 
-  const supabase = getSupabaseServer();
-
   try {
-    // === QUERY 1: Get all campaigns (with names) in ONE query ===
-    let campaignQuery = supabase.from('campaigns').select('id, name, status, objective, meta_account_id');
-    if (accountId) campaignQuery = campaignQuery.eq('meta_account_id', accountId);
-    const { data: campaigns } = await campaignQuery;
-    const campaignIds = (campaigns || []).map(c => c.id);
+    // QUERY 1: All campaigns in ONE query
+    const campaigns = accountId
+      ? await queryRows(`SELECT id, name, status, objective, meta_account_id FROM campaigns WHERE meta_account_id = $1`, [accountId])
+      : await queryRows(`SELECT id, name, status, objective, meta_account_id FROM campaigns`);
+
+    const campaignIds = campaigns.map(c => c.id);
     const campaignLookup = {};
-    for (const c of (campaigns || [])) campaignLookup[c.id] = c;
+    for (const c of campaigns) campaignLookup[c.id] = c;
 
     if (!campaignIds.length) {
       return NextResponse.json({
@@ -40,52 +38,37 @@ export async function GET(request) {
       });
     }
 
-    // === QUERY 2: All metrics for current period (ONE query) ===
-    const { data: currentMetrics } = await supabase
-      .from('metrics')
-      .select('spend, impressions, clicks, conversions, conversion_value, reach, frequency, date, campaign_id')
-      .eq('entity_type', 'campaign')
-      .in('campaign_id', campaignIds)
-      .gte('date', dateFrom)
-      .lte('date', dateTo)
-      .order('date', { ascending: true });
-
-    // === QUERY 3: Comparison period metrics (ONE query) ===
+    // QUERIES 2 + 3 in parallel: current period + comparison
     const { compFrom, compTo } = getComparisonDates(dateFrom, dateTo, compareMode);
-    let previousMetrics = [];
-    if (compFrom) {
-      const { data } = await supabase
-        .from('metrics')
-        .select('spend, impressions, clicks, conversions, conversion_value, reach, frequency')
-        .eq('entity_type', 'campaign')
-        .in('campaign_id', campaignIds)
-        .gte('date', compFrom)
-        .lte('date', compTo);
-      previousMetrics = data || [];
-    }
 
-    // === All computation is in-memory (fast) ===
-    const current = aggregateMetrics(currentMetrics || []);
+    const [currentMetrics, previousMetrics] = await Promise.all([
+      queryRows(
+        `SELECT spend, impressions, clicks, conversions, conversion_value, reach, frequency, date, campaign_id
+         FROM metrics WHERE entity_type = 'campaign' AND campaign_id = ANY($1::uuid[]) AND date >= $2 AND date <= $3
+         ORDER BY date ASC`,
+        [campaignIds, dateFrom, dateTo]
+      ),
+      compFrom
+        ? queryRows(
+            `SELECT spend, impressions, clicks, conversions, conversion_value, reach, frequency
+             FROM metrics WHERE entity_type = 'campaign' AND campaign_id = ANY($1::uuid[]) AND date >= $2 AND date <= $3`,
+            [campaignIds, compFrom, compTo]
+          )
+        : Promise.resolve([]),
+    ]);
+
+    const current = aggregateMetrics(currentMetrics);
     const previous = aggregateMetrics(previousMetrics);
 
-    // === REACH FIX: Fetch DEDUPLICATED reach from Meta API ===
-    // Reach counts unique people — summing daily reach inflates by 3-5x.
-    // We make a separate API call WITHOUT time_increment=1 to get the
-    // true period-level deduplicated reach (matches Meta Ads Manager).
+    // REACH: Fetch deduplicated reach from Meta API
     let deduplicatedReach = { current: 0, previous: 0 };
     try {
-      // Get unique account IDs from campaigns
-      const accountMetaIds = [...new Set((campaigns || []).map(c => c.meta_account_id))];
-
-      // Fetch account tokens
-      const { data: accounts } = await supabase
-        .from('meta_accounts')
-        .select('id, meta_account_id, access_token')
-        .in('id', accountMetaIds)
-        .eq('is_active', true);
-
-      if (accounts?.length) {
-        // Fetch deduplicated reach for all accounts in parallel
+      const accountMetaIds = [...new Set(campaigns.map(c => c.meta_account_id))];
+      const accounts = await queryRows(
+        `SELECT id, meta_account_id, access_token FROM meta_accounts WHERE id = ANY($1::uuid[]) AND is_active = true`,
+        [accountMetaIds]
+      );
+      if (accounts.length) {
         const reachResults = await Promise.all(accounts.map(async (acc) => {
           const [currReach, prevReach] = await Promise.all([
             fetchPeriodReach(acc.meta_account_id, acc.access_token, dateFrom, dateTo).catch(() => 0),
@@ -93,64 +76,48 @@ export async function GET(request) {
           ]);
           return { current: currReach, previous: prevReach };
         }));
-
-        // Sum across accounts (cross-account reach can legitimately be summed
-        // since different ad accounts target different audiences)
         for (const r of reachResults) {
           deduplicatedReach.current += r.current;
           deduplicatedReach.previous += r.previous;
         }
       }
     } catch (reachErr) {
-      console.warn('[Overview] Failed to fetch deduplicated reach, falling back to summed daily:', reachErr.message);
-      // Fallback to summed daily reach (inflated but better than 0)
+      console.warn('[Overview] Deduplicated reach failed, using summed daily:', reachErr.message);
       deduplicatedReach.current = current.reach;
       deduplicatedReach.previous = previous.reach;
     }
 
-    // Override reach with deduplicated values
     current.reach = deduplicatedReach.current;
     previous.reach = deduplicatedReach.previous;
-    const chartData = buildChartData(currentMetrics || [], breakdown);
+    const chartData = buildChartData(currentMetrics, breakdown);
 
-    // Campaign performance — computed from already-fetched data (no extra queries!)
+    // Campaign performance (from already-fetched data — no extra queries)
     const perfMap = {};
-    for (const row of (currentMetrics || [])) {
-      if (!perfMap[row.campaign_id]) {
-        perfMap[row.campaign_id] = { spend: 0, clicks: 0, conversions: 0, conversionValue: 0, impressions: 0 };
-      }
+    for (const row of currentMetrics) {
+      if (!perfMap[row.campaign_id]) perfMap[row.campaign_id] = { spend: 0, clicks: 0, conversions: 0, conversionValue: 0, impressions: 0 };
       const p = perfMap[row.campaign_id];
-      p.spend += parseFloat(row.spend || 0);
-      p.clicks += parseInt(row.clicks || 0);
-      p.conversions += parseFloat(row.conversions || 0);
-      p.conversionValue += parseFloat(row.conversion_value || 0);
+      p.spend += parseFloat(row.spend || 0); p.clicks += parseInt(row.clicks || 0);
+      p.conversions += parseFloat(row.conversions || 0); p.conversionValue += parseFloat(row.conversion_value || 0);
       p.impressions += parseInt(row.impressions || 0);
     }
 
     const campaignPerformance = Object.entries(perfMap).map(([cId, agg]) => {
       const camp = campaignLookup[cId];
       return {
-        id: cId,
-        name: camp?.name || 'Unknown',
-        status: camp?.status,
-        objective: camp?.objective,
-        spend: agg.spend,
-        conversions: agg.conversions,
+        id: cId, name: camp?.name || 'Unknown', status: camp?.status, objective: camp?.objective,
+        spend: agg.spend, conversions: agg.conversions,
         roas: agg.spend > 0 ? agg.conversionValue / agg.spend : 0,
         cpc: agg.clicks > 0 ? agg.spend / agg.clicks : 0,
         ctr: agg.impressions > 0 ? (agg.clicks / agg.impressions) * 100 : 0,
       };
     }).sort((a, b) => b.roas - a.roas);
 
-    // Objective breakdown — computed in memory
     const objMap = {};
     for (const [cId, agg] of Object.entries(perfMap)) {
       const obj = campaignLookup[cId]?.objective || 'UNKNOWN';
       if (!objMap[obj]) objMap[obj] = { objective: obj, spend: 0, conversions: 0, clicks: 0, impressions: 0 };
-      objMap[obj].spend += agg.spend;
-      objMap[obj].conversions += agg.conversions;
-      objMap[obj].clicks += agg.clicks;
-      objMap[obj].impressions += agg.impressions;
+      objMap[obj].spend += agg.spend; objMap[obj].conversions += agg.conversions;
+      objMap[obj].clicks += agg.clicks; objMap[obj].impressions += agg.impressions;
     }
     const objectiveBreakdown = Object.values(objMap)
       .map(o => ({ ...o, cpc: o.clicks > 0 ? o.spend / o.clicks : 0 }))
@@ -165,8 +132,7 @@ export async function GET(request) {
         topCampaigns: campaignPerformance.filter(c => c.spend > 0).slice(0, 5),
         bottomCampaigns: campaignPerformance.filter(c => c.spend > 0).slice(-5).reverse(),
       },
-      objectiveBreakdown,
-      trends,
+      objectiveBreakdown, trends,
       period: { from: dateFrom, to: dateTo, comparisonFrom: compFrom, comparisonTo: compTo, compareMode, breakdown },
     });
   } catch (err) {
@@ -176,7 +142,7 @@ export async function GET(request) {
 }
 
 // ================================================
-// HELPER FUNCTIONS — all pure computation, no DB calls
+// HELPER FUNCTIONS — pure computation, no DB calls
 // ================================================
 
 function emptyKPIs() {

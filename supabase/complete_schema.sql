@@ -1,7 +1,11 @@
 -- =============================================================
--- META ADS ANALYTICS — COMPLETE DATABASE SCHEMA
--- Run this ENTIRE file in your new Supabase SQL Editor
+-- META ADS ERP — COMPLETE VPS POSTGRESQL SCHEMA
+-- Run this file after creating the meta_ads database on VPS.
+-- Includes all 16 tables, indexes, and triggers.
 -- =============================================================
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";  -- Fast ILIKE searches
 
 -- 1. META ACCOUNTS
 CREATE TABLE IF NOT EXISTS meta_accounts (
@@ -83,7 +87,7 @@ CREATE TABLE IF NOT EXISTS ads (
     updated_at          TIMESTAMPTZ DEFAULT now()
 );
 
--- 6. METRICS (with generated columns)
+-- 6. METRICS (with generated computed columns)
 CREATE TABLE IF NOT EXISTS metrics (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     entity_type         TEXT NOT NULL CHECK (entity_type IN ('campaign', 'ad_set', 'ad')),
@@ -213,13 +217,7 @@ CREATE TABLE IF NOT EXISTS sync_status (
     duration_ms         INT
 );
 
--- 11. REALTIME FOR NOTIFICATIONS
-DO $$ BEGIN
-  ALTER PUBLICATION supabase_realtime ADD TABLE notifications;
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
--- 12. USERS (ROLE-BASED ACCESS)
+-- 11. USERS (role-based access)
 CREATE TABLE IF NOT EXISTS users (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username          TEXT NOT NULL UNIQUE,
@@ -238,7 +236,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active, role);
 
--- 13. LIVE AD MONITORING
+-- 12. AUTOMATION PAUSED ADS
 CREATE TABLE IF NOT EXISTS automation_paused_ads (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     ad_external_id    TEXT NOT NULL,
@@ -255,7 +253,7 @@ CREATE TABLE IF NOT EXISTS automation_paused_ads (
 CREATE INDEX IF NOT EXISTS idx_auto_paused_active ON automation_paused_ads(ad_external_id, is_paused);
 CREATE INDEX IF NOT EXISTS idx_auto_paused_rule ON automation_paused_ads(rule_id, is_paused);
 
--- 14. BLOCKED ACCOUNTS (COMMENTS MODERATION)
+-- 13. BLOCKED ACCOUNTS (comments moderation)
 CREATE TABLE IF NOT EXISTS blocked_accounts (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     page_id     TEXT NOT NULL,
@@ -269,7 +267,7 @@ CREATE TABLE IF NOT EXISTS blocked_accounts (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_blocked_unique ON blocked_accounts(page_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_blocked_page ON blocked_accounts(page_id);
 
--- 15. SPAM COMMENTS LOG
+-- 14. SPAM COMMENTS LOG
 CREATE TABLE IF NOT EXISTS spam_comments_log (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     comment_id      TEXT NOT NULL,
@@ -285,6 +283,48 @@ CREATE TABLE IF NOT EXISTS spam_comments_log (
 
 CREATE INDEX IF NOT EXISTS idx_spam_log_date ON spam_comments_log(created_at DESC);
 
+-- 15. PAGE TOKENS (for comment moderation across all pages)
+CREATE TABLE IF NOT EXISTS page_tokens (
+    id                    UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    page_id               TEXT NOT NULL UNIQUE,
+    page_name             TEXT,
+    page_access_token     TEXT NOT NULL,
+    instagram_account_id  TEXT,
+    updated_at            TIMESTAMPTZ DEFAULT now(),
+    created_at            TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_page_tokens_page_id ON page_tokens(page_id);
+CREATE INDEX IF NOT EXISTS idx_page_tokens_ig_account ON page_tokens(instagram_account_id)
+    WHERE instagram_account_id IS NOT NULL;
+
+-- 16. AUTO-UPDATE updated_at TRIGGER
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER meta_accounts_updated_at
+  BEFORE UPDATE ON meta_accounts FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE OR REPLACE TRIGGER campaigns_updated_at
+  BEFORE UPDATE ON campaigns FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE OR REPLACE TRIGGER ad_sets_updated_at
+  BEFORE UPDATE ON ad_sets FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE OR REPLACE TRIGGER ads_updated_at
+  BEFORE UPDATE ON ads FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE OR REPLACE TRIGGER automation_rules_updated_at
+  BEFORE UPDATE ON automation_rules FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE OR REPLACE TRIGGER users_updated_at
+  BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
 -- =============================================================
--- DONE — All 15 tables created
+-- DONE — 16 tables, all indexes, all triggers
 -- =============================================================

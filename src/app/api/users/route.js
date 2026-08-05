@@ -1,20 +1,15 @@
 import { NextResponse } from 'next/server';
-import { getSupabaseServer } from '@/lib/supabase-server';
+import { queryRows, queryOne, query } from '@/lib/db';
 import { hashPassword, generateSalt } from '@/lib/auth';
 
 // GET /api/users — List all users (admin only — enforced by middleware)
 export async function GET() {
-  const supabase = getSupabaseServer();
-
   try {
-    const { data: users, error } = await supabase
-      .from('users')
-      .select('id, username, display_name, role, is_active, last_login_at, created_at')
-      .order('created_at', { ascending: true });
-
-    if (error) throw error;
-
-    return NextResponse.json({ users: users || [] });
+    const users = await queryRows(
+      `SELECT id, username, display_name, role, is_active, last_login_at, created_at
+       FROM users ORDER BY created_at ASC`
+    );
+    return NextResponse.json({ users });
   } catch (err) {
     console.error('Users list error:', err);
     return NextResponse.json({ error: err.message }, { status: 500 });
@@ -28,53 +23,32 @@ export async function POST(request) {
   if (!username || !password) {
     return NextResponse.json({ error: 'Username and password required' }, { status: 400 });
   }
-
   if (password.length < 8) {
     return NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 });
   }
-
   const validRoles = ['admin', 'developer', 'viewer'];
   if (role && !validRoles.includes(role)) {
     return NextResponse.json({ error: `Invalid role. Must be: ${validRoles.join(', ')}` }, { status: 400 });
   }
-
-  // Prevent creating users with env admin username
   if (username === process.env.ADMIN_USERNAME) {
     return NextResponse.json({ error: 'This username is reserved' }, { status: 400 });
   }
 
-  const supabase = getSupabaseServer();
-
   try {
-    // Check if username already exists
-    const { data: existing } = await supabase
-      .from('users')
-      .select('id')
-      .eq('username', username)
-      .single();
-
+    const existing = await queryOne(`SELECT id FROM users WHERE username = $1`, [username]);
     if (existing) {
       return NextResponse.json({ error: 'Username already taken' }, { status: 409 });
     }
 
-    // Hash password with random salt
     const salt = generateSalt();
     const passwordHash = await hashPassword(password, salt);
 
-    const { data: user, error } = await supabase
-      .from('users')
-      .insert({
-        username,
-        display_name: displayName || username,
-        password_hash: passwordHash,
-        password_salt: salt,
-        role: role || 'viewer',
-        is_active: true,
-      })
-      .select('id, username, display_name, role, is_active, created_at')
-      .single();
-
-    if (error) throw error;
+    const user = await queryOne(
+      `INSERT INTO users (username, display_name, password_hash, password_salt, role, is_active)
+       VALUES ($1,$2,$3,$4,$5,true)
+       RETURNING id, username, display_name, role, is_active, created_at`,
+      [username, displayName || username, passwordHash, salt, role || 'viewer']
+    );
 
     return NextResponse.json({ user });
   } catch (err) {
@@ -87,50 +61,42 @@ export async function POST(request) {
 export async function PATCH(request) {
   const { id, role, isActive, password, displayName } = await request.json();
 
-  if (!id) {
-    return NextResponse.json({ error: 'User id required' }, { status: 400 });
-  }
-
-  const supabase = getSupabaseServer();
+  if (!id) return NextResponse.json({ error: 'User id required' }, { status: 400 });
 
   try {
-    const updates = { updated_at: new Date().toISOString() };
+    const setClauses = ['updated_at = now()'];
+    const params = [];
 
-    if (role) {
+    if (role !== undefined) {
       const validRoles = ['admin', 'developer', 'viewer'];
-      if (!validRoles.includes(role)) {
-        return NextResponse.json({ error: 'Invalid role' }, { status: 400 });
-      }
-      updates.role = role;
+      if (!validRoles.includes(role)) return NextResponse.json({ error: 'Invalid role' }, { status: 400 });
+      params.push(role);
+      setClauses.push(`role = $${params.length}`);
     }
-
     if (isActive !== undefined) {
-      updates.is_active = isActive;
+      params.push(isActive);
+      setClauses.push(`is_active = $${params.length}`);
     }
-
     if (displayName !== undefined) {
-      updates.display_name = displayName;
+      params.push(displayName);
+      setClauses.push(`display_name = $${params.length}`);
     }
-
     if (password) {
-      if (password.length < 8) {
-        return NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 });
-      }
+      if (password.length < 8) return NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 });
       const salt = generateSalt();
-      updates.password_hash = await hashPassword(password, salt);
-      updates.password_salt = salt;
+      const hash = await hashPassword(password, salt);
+      params.push(hash, salt);
+      setClauses.push(`password_hash = $${params.length - 1}`, `password_salt = $${params.length}`);
     }
 
-    const { data, error } = await supabase
-      .from('users')
-      .update(updates)
-      .eq('id', id)
-      .select('id, username, display_name, role, is_active')
-      .single();
+    params.push(id);
+    const user = await queryOne(
+      `UPDATE users SET ${setClauses.join(', ')} WHERE id = $${params.length}
+       RETURNING id, username, display_name, role, is_active`,
+      params
+    );
 
-    if (error) throw error;
-
-    return NextResponse.json({ user: data });
+    return NextResponse.json({ user });
   } catch (err) {
     console.error('User update error:', err);
     return NextResponse.json({ error: err.message }, { status: 500 });
@@ -140,21 +106,10 @@ export async function PATCH(request) {
 // DELETE /api/users — Delete a user (admin only)
 export async function DELETE(request) {
   const { id } = await request.json();
-
-  if (!id) {
-    return NextResponse.json({ error: 'User id required' }, { status: 400 });
-  }
-
-  const supabase = getSupabaseServer();
+  if (!id) return NextResponse.json({ error: 'User id required' }, { status: 400 });
 
   try {
-    const { error } = await supabase
-      .from('users')
-      .delete()
-      .eq('id', id);
-
-    if (error) throw error;
-
+    await query(`DELETE FROM users WHERE id = $1`, [id]);
     return NextResponse.json({ success: true });
   } catch (err) {
     console.error('User delete error:', err);

@@ -1,16 +1,16 @@
 import { NextResponse } from 'next/server';
-import { getSupabaseServer } from '@/lib/supabase-server';
+import { queryOne, query } from '@/lib/db';
 
 // GET /api/settings/exchange-rate
 export async function GET() {
-  const supabase = getSupabaseServer();
-  const { data } = await supabase
-    .from('system_settings')
-    .select('value')
-    .eq('key', 'usd_to_inr_rate')
-    .single();
-
-  return NextResponse.json({ rate: data?.value?.rate || 84.5 });
+  try {
+    const row = await queryOne(
+      `SELECT value FROM system_settings WHERE key = 'usd_to_inr_rate'`
+    );
+    return NextResponse.json({ rate: row?.value?.rate || 84.5 });
+  } catch {
+    return NextResponse.json({ rate: 84.5 });
+  }
 }
 
 // POST /api/settings/exchange-rate — Update exchange rate
@@ -20,12 +20,15 @@ export async function POST(request) {
     return NextResponse.json({ error: 'Invalid rate' }, { status: 400 });
   }
 
-  const supabase = getSupabaseServer();
-  await supabase.from('system_settings').upsert({
-    key: 'usd_to_inr_rate',
-    value: { rate, last_updated: new Date().toISOString().split('T')[0] },
-    updated_at: new Date().toISOString(),
-  });
-
-  return NextResponse.json({ success: true, rate });
+  try {
+    await query(
+      `INSERT INTO system_settings (key, value, updated_at)
+       VALUES ('usd_to_inr_rate', $1, now())
+       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = now()`,
+      [JSON.stringify({ rate, last_updated: new Date().toISOString().split('T')[0] })]
+    );
+    return NextResponse.json({ success: true, rate });
+  } catch (err) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
 }

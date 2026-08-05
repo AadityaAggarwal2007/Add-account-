@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { getSupabaseServer } from '@/lib/supabase-server';
+import { queryOne, query } from '@/lib/db';
 import { verifyPassword, signToken } from '@/lib/auth';
 
 const AUTH_COOKIE = 'meta_ads_session';
@@ -24,15 +24,13 @@ export async function POST(request) {
 
     // === STEP 1: Check users table in DB ===
     try {
-      const supabase = getSupabaseServer();
-      const { data: user } = await supabase
-        .from('users')
-        .select('id, username, display_name, password_hash, password_salt, role, is_active')
-        .eq('username', username)
-        .single();
+      const user = await queryOne(
+        `SELECT id, username, display_name, password_hash, password_salt, role, is_active
+         FROM users WHERE username = $1`,
+        [username]
+      );
 
       if (user) {
-        // User found in DB
         if (!user.is_active) {
           return NextResponse.json({ error: 'Account is deactivated' }, { status: 403 });
         }
@@ -46,10 +44,10 @@ export async function POST(request) {
         displayName = user.display_name || user.username;
 
         // Update last login
-        await supabase
-          .from('users')
-          .update({ last_login_at: new Date().toISOString() })
-          .eq('id', user.id);
+        await query(
+          `UPDATE users SET last_login_at = now() WHERE id = $1`,
+          [user.id]
+        );
       }
     } catch {
       // Users table might not exist yet — fall through to env check
@@ -68,32 +66,26 @@ export async function POST(request) {
         return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
       }
 
-      authenticatedRole = 'admin'; // env login is always admin
+      authenticatedRole = 'admin';
       displayName = 'Admin';
     }
 
     // === STEP 3: Create signed session token ===
-    // Format: base64(username:role:timestamp:hmac_signature)
     const timestamp = Date.now();
     const payload = `${username}:${authenticatedRole}:${timestamp}`;
     const signature = await signToken(payload, signingSecret);
     const token = btoa(`${payload}:${signature}`);
 
-    // Set HTTP-only secure cookie — expires in 7 days
     const cookieStore = await cookies();
     cookieStore.set(AUTH_COOKIE, token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict', // stricter than 'lax' for security
+      sameSite: 'strict',
       path: '/',
       maxAge: 7 * 24 * 60 * 60,
     });
 
-    return NextResponse.json({
-      success: true,
-      role: authenticatedRole,
-      displayName,
-    });
+    return NextResponse.json({ success: true, role: authenticatedRole, displayName });
   } catch (err) {
     console.error('[Auth] Login error:', err);
     return NextResponse.json({ error: 'Login failed' }, { status: 500 });

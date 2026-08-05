@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getSupabaseServer } from '@/lib/supabase-server';
+import { queryRows, queryOne, query } from '@/lib/db';
 
 // GET — list notifications
 export async function GET(request) {
@@ -7,37 +7,43 @@ export async function GET(request) {
   const unreadOnly = searchParams.get('unread') === 'true';
   const limit = parseInt(searchParams.get('limit') || '20');
 
-  const supabase = getSupabaseServer();
-  let query = supabase
-    .from('notifications')
-    .select('*')
-    .order('created_at', { ascending: false })
-    .limit(limit);
+  try {
+    const rows = await queryRows(
+      `SELECT * FROM notifications
+       ${unreadOnly ? 'WHERE is_read = false' : ''}
+       ORDER BY created_at DESC
+       LIMIT $1`,
+      [limit]
+    );
 
-  if (unreadOnly) query = query.eq('is_read', false);
+    const countRow = await queryOne(
+      `SELECT COUNT(*) as count FROM notifications WHERE is_read = false`
+    );
 
-  const { data, error } = await query;
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-
-  // Also get unread count
-  const { count } = await supabase
-    .from('notifications')
-    .select('*', { count: 'exact', head: true })
-    .eq('is_read', false);
-
-  return NextResponse.json({ notifications: data, unreadCount: count || 0 });
+    return NextResponse.json({
+      notifications: rows,
+      unreadCount: parseInt(countRow?.count || '0'),
+    });
+  } catch (err) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
 }
 
 // POST — mark notifications as read
 export async function POST(request) {
   const { ids, markAll } = await request.json();
-  const supabase = getSupabaseServer();
 
-  if (markAll) {
-    await supabase.from('notifications').update({ is_read: true }).eq('is_read', false);
-  } else if (ids?.length) {
-    await supabase.from('notifications').update({ is_read: true }).in('id', ids);
+  try {
+    if (markAll) {
+      await query(`UPDATE notifications SET is_read = true WHERE is_read = false`);
+    } else if (ids?.length) {
+      await query(
+        `UPDATE notifications SET is_read = true WHERE id = ANY($1::uuid[])`,
+        [ids]
+      );
+    }
+    return NextResponse.json({ success: true });
+  } catch (err) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
   }
-
-  return NextResponse.json({ success: true });
 }

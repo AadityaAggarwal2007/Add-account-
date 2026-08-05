@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "deploy": "git pull origin main && npm ci --production=false && npm run build && pm2 reload meta-ads --update-env"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
@@ -21,7 +22,6 @@
     "@radix-ui/react-toggle": "^1.1.10",
     "@radix-ui/react-toggle-group": "^1.1.11",
     "@radix-ui/react-tooltip": "^1.2.8",
-    "@supabase/supabase-js": "^2.101.1",
     "@tanstack/react-query": "^5.96.1",
     "autoprefixer": "^10.4.27",
     "class-variance-authority": "^0.7.1",
@@ -29,6 +29,7 @@
     "date-fns": "^4.1.0",
     "lucide-react": "^1.7.0",
     "next": "16.2.2",
+    "pg": "^8.22.0",
     "postcss": "^8.5.8",
     "react": "19.2.4",
     "react-dom": "19.2.4",

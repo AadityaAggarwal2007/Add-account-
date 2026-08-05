@@ -1,20 +1,17 @@
 import { NextResponse } from 'next/server';
 import { evaluateLiveRules } from '@/lib/live-rule-evaluator';
-import { getSupabaseServer } from '@/lib/supabase-server';
+import { queryOne, query } from '@/lib/db';
 
 // POST /api/automation/live-evaluate
 // Called by CRON every 60 seconds. Fetches live Meta data and evaluates ad rules.
 //
-// CRON SETUP (cron-job.org — free):
-//   URL: https://www.krvvy.info/api/automation/live-evaluate
-//   Method: POST
-//   Header: x-cron-secret: YOUR_CRON_SECRET_KEY
-//   Schedule: Every 1 minute
-//
-// Vercel timeout: 300s (set below) — needed for 500+ ads with parallel pauses
+// CRON SETUP (VPS crontab):
+//   * * * * * curl -s --max-time 55 -X POST \
+//     -H "x-cron-secret: YOUR_CRON_SECRET_KEY" \
+//     "http://localhost:3001/api/automation/live-evaluate" >> /var/log/meta-ads-cron.log 2>&1
 export const maxDuration = 300;
+
 export async function POST(request) {
-  // Auth: cron secret OR manual trigger
   const cronSecret    = request.headers.get('x-cron-secret');
   const manualTrigger = request.headers.get('x-manual-trigger');
 
@@ -26,7 +23,6 @@ export async function POST(request) {
 
   try {
     const result = await evaluateLiveRules();
-    const supabase = getSupabaseServer();
     const now = new Date().toISOString();
 
     const healthPayload = {
@@ -42,10 +38,11 @@ export async function POST(request) {
       error:         null,
     };
 
-    // ── Update cron_health ──
-    await supabase.from('system_settings').upsert(
-      { key: 'cron_health', value: healthPayload, updated_at: now },
-      { onConflict: 'key' }
+    await query(
+      `INSERT INTO system_settings (key, value, updated_at)
+       VALUES ('cron_health', $1, now())
+       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = now()`,
+      [JSON.stringify(healthPayload)]
     );
 
     return NextResponse.json({ ...result, source });
@@ -53,12 +50,13 @@ export async function POST(request) {
     console.error('[LiveEvaluate] Error:', err);
 
     try {
-      const supabase = getSupabaseServer();
       const now = new Date().toISOString();
       const errPayload = { last_run_at: now, source, status: 'failed', error: err.message };
-      await supabase.from('system_settings').upsert(
-        { key: 'cron_health', value: errPayload, updated_at: now },
-        { onConflict: 'key' }
+      await query(
+        `INSERT INTO system_settings (key, value, updated_at)
+         VALUES ('cron_health', $1, now())
+         ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = now()`,
+        [JSON.stringify(errPayload)]
       );
     } catch {}
 
@@ -69,20 +67,12 @@ export async function POST(request) {
 // GET /api/automation/live-evaluate — cron health check
 export async function GET() {
   try {
-    const supabase = getSupabaseServer();
-
-    const { data: cronData } = await supabase
-      .from('system_settings')
-      .select('value, updated_at')
-      .eq('key', 'cron_health')
-      .single();
+    const cronData = await queryOne(
+      `SELECT value, updated_at FROM system_settings WHERE key = 'cron_health'`
+    );
 
     if (!cronData?.value) {
-      return NextResponse.json({
-        status: 'never_run',
-        message: 'Cron has never executed.',
-        healthy: false,
-      });
+      return NextResponse.json({ status: 'never_run', message: 'Cron has never executed.', healthy: false });
     }
 
     const lastRun = new Date(cronData.value.last_run_at);
