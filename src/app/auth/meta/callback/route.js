@@ -30,7 +30,11 @@ export async function GET(request) {
   const code = searchParams.get('code');
   const error = searchParams.get('error');
 
-  const baseUrl = new URL(request.url).origin;
+  // Always use the public domain (from Nginx forwarded headers), not internal localhost
+  const fwdHost = request.headers.get('x-forwarded-host') || new URL(request.url).host;
+  const fwdProto = request.headers.get('x-forwarded-proto') || 'https';
+  const baseUrl = `${fwdProto}://${fwdHost}`;
+  const redirectUri = `${baseUrl}/auth/meta/callback`;
 
   if (error) {
     return NextResponse.redirect(`${baseUrl}/settings?error=${encodeURIComponent(error)}`);
@@ -38,12 +42,6 @@ export async function GET(request) {
   if (!code) {
     return NextResponse.redirect(`${baseUrl}/settings?error=no_code`);
   }
-
-  // Build the exact same redirectUri that was used in the OAuth dialog
-  const host = request.headers.get('x-forwarded-host') || new URL(request.url).host;
-  const proto = request.headers.get('x-forwarded-proto') || 'https';
-  const callbackBase = `${proto}://${host}`;
-  const redirectUri = `${callbackBase}/auth/meta/callback`;
 
   try {
     const { accessToken, expiresIn } = await exchangeCodeForToken(code, redirectUri);
@@ -53,7 +51,9 @@ export async function GET(request) {
       fetchAllPageTokens(accessToken),
     ]);
 
-    const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+    // expiresIn may be undefined for long-lived tokens — default to 60 days
+    const expiresSeconds = typeof expiresIn === 'number' && expiresIn > 0 ? expiresIn : 60 * 24 * 3600;
+    const expiresAt = new Date(Date.now() + expiresSeconds * 1000).toISOString();
 
     // Bulk upsert ad accounts
     for (const acct of accounts) {
