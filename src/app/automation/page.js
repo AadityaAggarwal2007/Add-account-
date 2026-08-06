@@ -241,7 +241,7 @@ function AutomationContent() {
 
           {/* Buttons */}
           <div className="flex items-center gap-2">
-            {/* Telegram Report button */}
+            {/* Telegram Report button — hidden (not in use)
             <button
               onClick={handleSendReport}
               disabled={sendingReport}
@@ -264,6 +264,7 @@ function AutomationContent() {
                 <>📱 Report</>
               )}
             </button>
+            */}
 
             {/* Run Now button */}
             <button
