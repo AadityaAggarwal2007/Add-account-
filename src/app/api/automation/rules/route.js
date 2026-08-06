@@ -65,9 +65,16 @@ export async function PATCH(request) {
   const setClauses = [];
   const params = [];
 
+  // Fields that are JSONB in Postgres — must be serialized
+  const jsonbFields = new Set(['conditions', 'action_params']);
+
   for (const [key, val] of Object.entries(updates)) {
     if (!allowedFields.includes(key)) continue;
-    params.push(typeof val === 'object' && val !== null && !Array.isArray(val) ? JSON.stringify(val) : val);
+    // JSONB columns need explicit stringify; pg arrays (target_*) pass through as-is
+    const serialized = jsonbFields.has(key) && val !== null
+      ? JSON.stringify(val)
+      : (typeof val === 'object' && val !== null && !Array.isArray(val) ? JSON.stringify(val) : val);
+    params.push(serialized);
     setClauses.push(`${key} = $${params.length}`);
   }
 
