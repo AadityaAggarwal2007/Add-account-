@@ -126,6 +126,9 @@ async function handleAds(accounts, dateFrom, dateTo) {
 
       const adRows = {};
       for (const row of insights) {
+        // Skip ads not in fetchAccountAds (deleted/archived — they exist in historical
+        // insights but are not visible in Meta Ads Manager default view)
+        if (!detailsMap[row.adId]) continue;
         if (!adRows[row.adId]) adRows[row.adId] = { name: row.adName, rows: [] };
         adRows[row.adId].rows.push(row);
       }
@@ -182,10 +185,19 @@ async function fetchAccountAdSets(accountId, accessToken) {
 }
 
 async function fetchAccountAds(accountId, accessToken) {
-  const res = await fetch(`${META_GRAPH_URL}/act_${accountId}/ads?fields=id,name,status,creative{thumbnail_url,object_type}&limit=500&access_token=${accessToken}`);
-  if (!res.ok) return [];
-  const { data } = await res.json();
-  return (data || []).map(ad => ({
+  const allAds = [];
+  let url = `${META_GRAPH_URL}/act_${accountId}/ads?fields=id,name,status,creative{thumbnail_url,object_type}&limit=500&access_token=${accessToken}`;
+
+  // Paginate to get ALL ads (not just first 500)
+  while (url) {
+    const res = await fetch(url);
+    if (!res.ok) break;
+    const json = await res.json();
+    if (json.data) allAds.push(...json.data);
+    url = json.paging?.next || null;
+  }
+
+  return allAds.map(ad => ({
     id: ad.id, name: ad.name, status: ad.status,
     thumbnailUrl: ad.creative?.thumbnail_url || null,
     creativeType: ad.creative?.object_type || null,
