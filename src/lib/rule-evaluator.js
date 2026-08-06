@@ -221,6 +221,8 @@ async function getEntityMetrics(rule, entity) {
     agg.cpc = agg.clicks > 0 ? agg.spend / agg.clicks : 0;
     agg.ctr = agg.impressions > 0 ? (agg.clicks / agg.impressions) * 100 : 0;
     agg.roas = agg.spend > 0 ? agg.conversion_value / agg.spend : 0;
+    agg.cpr = agg.conversions > 0 ? agg.spend / agg.conversions : (agg.spend > 0 ? 999999 : 0);
+    agg.cpm = agg.impressions > 0 ? (agg.spend / agg.impressions) * 1000 : 0;
 
     metrics[period] = agg;
   }

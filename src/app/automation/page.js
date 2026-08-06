@@ -893,14 +893,15 @@ function RuleModal({ rule, prefilledCampaign, onClose, onSave, formatMoney }) {
                 <div key={i} className="flex gap-2 mb-2 items-center flex-wrap">
                   <select value={c.metric} onChange={e => updateCond(i, 'metric', e.target.value)} className={`${inputCls} !w-auto`}>
                     {[
-                      { value: 'cpr', label: 'CPR (cost/result)' },
-                      { value: 'cpc', label: 'CPC (cost/click)' },
-                      { value: 'spend', label: 'Spend ($)' },
-                      { value: 'ctr', label: 'CTR (%)' },
-                      { value: 'cpm', label: 'CPM' },
-                      { value: 'conversions', label: 'Results' },
+                      { value: 'cpr',         label: 'Cost per Result (CPR)' },
+                      { value: 'cpc',         label: 'Cost per Click (CPC)' },
+                      { value: 'spend',       label: 'Amount Spent ($)' },
+                      { value: 'roas',        label: 'ROAS (return on ad spend)' },
+                      { value: 'ctr',         label: 'CTR (click-through rate %)' },
+                      { value: 'cpm',         label: 'CPM (cost per 1000 impressions)' },
+                      { value: 'conversions', label: 'Results (conversions)' },
                       { value: 'impressions', label: 'Impressions' },
-                      { value: 'clicks', label: 'Clicks' },
+                      { value: 'clicks',      label: 'Clicks' },
                     ].map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                   </select>
                   <select value={c.operator} onChange={e => updateCond(i, 'operator', e.target.value)} className={`${inputCls} !w-16`}>
