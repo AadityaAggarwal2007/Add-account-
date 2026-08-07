@@ -186,7 +186,13 @@ async function fetchAccountAdSets(accountId, accessToken) {
 
 async function fetchAccountAds(accountId, accessToken) {
   const allAds = [];
-  let url = `${META_GRAPH_URL}/act_${accountId}/ads?fields=id,name,status,creative{thumbnail_url,object_type}&limit=500&access_token=${accessToken}`;
+  // Include ALL effective statuses — CAMPAIGN_PAUSED and ADSET_PAUSED are
+  // missing from the default response, causing 296→112 ad count discrepancy
+  const statuses = encodeURIComponent(JSON.stringify([
+    'ACTIVE', 'PAUSED', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED',
+    'PENDING_REVIEW', 'IN_PROCESS', 'DISAPPROVED',
+  ]));
+  let url = `${META_GRAPH_URL}/act_${accountId}/ads?fields=id,name,status,creative{thumbnail_url,object_type}&effective_status=${statuses}&limit=500&access_token=${accessToken}`;
 
   // Paginate to get ALL ads (not just first 500)
   while (url) {

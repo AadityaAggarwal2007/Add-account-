@@ -409,19 +409,22 @@ export async function fetchAdCreativeMedia(adId, accessToken) {
 // Meta Ads Manager shows "Results" as the FIRST matching type only.
 // We use exact matching (no .includes()) to prevent double-counting.
 const CONVERSION_PRIORITY = [
+  // Website pixel purchases first — matches Meta Ads Manager "Results" column
+  // for purchase-objective campaigns (website purchases only, not omni/app)
   'purchase',
-  'omni_purchase',
   'offsite_conversion.fb_pixel_purchase',
   'lead',
   'offsite_conversion.fb_pixel_lead',
   'complete_registration',
   'offsite_conversion.fb_pixel_complete_registration',
   'add_to_cart',
-  'omni_add_to_cart',
   'offsite_conversion.fb_pixel_add_to_cart',
   'initiate_checkout',
   'offsite_conversion.fb_pixel_initiate_checkout',
   'onsite_conversion.messaging_conversation_started_7d',
+  // omni_purchase last — includes app/offline, inflates vs Meta Ads Manager
+  'omni_purchase',
+  'omni_add_to_cart',
   // NOTE: landing_page_view and link_click removed — they inflate results
 ];
 
