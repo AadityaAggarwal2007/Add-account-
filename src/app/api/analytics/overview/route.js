@@ -63,11 +63,14 @@ export async function GET(request) {
     // REACH: Fetch deduplicated reach from Meta API
     let deduplicatedReach = { current: 0, previous: 0 };
     try {
-      const accountMetaIds = [...new Set(campaigns.map(c => c.meta_account_id))];
-      const accounts = await queryRows(
-        `SELECT id, meta_account_id, access_token FROM meta_accounts WHERE id = ANY($1::uuid[]) AND is_active = true`,
-        [accountMetaIds]
-      );
+      // Filter out null values before uuid[] cast — null meta_account_id would crash Postgres
+      const accountMetaIds = [...new Set(campaigns.map(c => c.meta_account_id).filter(Boolean))];
+      const accounts = accountMetaIds.length
+        ? await queryRows(
+            `SELECT id, meta_account_id, access_token FROM meta_accounts WHERE id = ANY($1::uuid[]) AND is_active = true`,
+            [accountMetaIds]
+          )
+        : [];
       if (accounts.length) {
         const reachResults = await Promise.all(accounts.map(async (acc) => {
           const [currReach, prevReach] = await Promise.all([
