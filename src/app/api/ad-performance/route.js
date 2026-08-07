@@ -185,14 +185,19 @@ function findDominantConversionType(allActionArrays) {
   const typeSet = new Set();
   for (const actions of allActionArrays) for (const a of actions) typeSet.add(a.action_type);
 
-  // If this ad has any purchase-type action, restrict to purchase types only.
-  // This prevents ads with 0 purchases but 5 add_to_carts from showing 5 results.
+  // If this ad has any purchase-type action, restrict to PIXEL purchases only.
+  // Meta Ads Manager "Results" = Website purchases (pixel only, not app/offline).
+  // If only omni_purchase exists (app/offline, no pixel), return null → 0 results.
   const hasPurchaseType = [...typeSet].some(t => PURCHASE_TYPES.has(t));
-  const typesToCheck = hasPurchaseType
-    ? ['purchase', 'offsite_conversion.fb_pixel_purchase', 'omni_purchase']
-    : CONVERSION_PRIORITY;
+  if (hasPurchaseType) {
+    if (typeSet.has('purchase')) return 'purchase';
+    if (typeSet.has('offsite_conversion.fb_pixel_purchase')) return 'offsite_conversion.fb_pixel_purchase';
+    // Only omni_purchase (app/offline) — Meta shows 0 website purchases → we do too
+    return null;
+  }
 
-  for (const type of typesToCheck) if (typeSet.has(type)) return type;
+  // No purchase types at all — check other objectives (lead, add_to_cart, etc.)
+  for (const type of CONVERSION_PRIORITY) if (typeSet.has(type)) return type;
   return null;
 }
 
