@@ -428,10 +428,27 @@ const CONVERSION_PRIORITY = [
   // NOTE: landing_page_view and link_click removed — they inflate results
 ];
 
+// Purchase-type action names — if ANY of these appear in the actions array
+// (even with value 0), we only count purchase types. This prevents falling
+// through to add_to_cart/lead for purchase-objective ads that got 0 purchases.
+const PURCHASE_TYPES = new Set([
+  'purchase',
+  'offsite_conversion.fb_pixel_purchase',
+  'omni_purchase',
+]);
+
 function extractConversions(actions) {
   if (!actions || !Array.isArray(actions)) return 0;
-  // Find the highest-priority action type that exists in this row
-  for (const type of CONVERSION_PRIORITY) {
+
+  // If this is a purchase-objective ad (has any purchase action in the array),
+  // ONLY count purchase conversions — matches Meta Ads Manager "Results" column.
+  // Without this guard, ads with 0 purchases but 5 add_to_carts would show 5 results.
+  const hasPurchaseType = actions.some(a => PURCHASE_TYPES.has(a.action_type));
+  const typesToCheck = hasPurchaseType
+    ? ['purchase', 'offsite_conversion.fb_pixel_purchase', 'omni_purchase']
+    : CONVERSION_PRIORITY;
+
+  for (const type of typesToCheck) {
     const action = actions.find(a => a.action_type === type);
     if (action) return parseFloat(action.value || '0');
   }
