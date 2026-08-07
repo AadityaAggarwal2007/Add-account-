@@ -5,13 +5,24 @@ import { fetchInsights } from '@/lib/meta-api';
 const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
 
 const CONVERSION_PRIORITY = [
-  'purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase',
+  // Website pixel purchases first — matches Meta Ads Manager "Results" column
+  'purchase', 'offsite_conversion.fb_pixel_purchase',
   'lead', 'offsite_conversion.fb_pixel_lead',
   'complete_registration', 'offsite_conversion.fb_pixel_complete_registration',
-  'add_to_cart', 'omni_add_to_cart', 'offsite_conversion.fb_pixel_add_to_cart',
+  'add_to_cart', 'offsite_conversion.fb_pixel_add_to_cart',
   'initiate_checkout', 'offsite_conversion.fb_pixel_initiate_checkout',
   'onsite_conversion.messaging_conversation_started_7d',
+  // omni_purchase last — includes app/offline, inflates vs Meta Ads Manager
+  'omni_purchase', 'omni_add_to_cart',
 ];
+
+// If ANY purchase action exists for an ad, only count purchase types.
+// Prevents add_to_cart from being counted for purchase-objective ads with 0 purchases.
+const PURCHASE_TYPES = new Set([
+  'purchase',
+  'offsite_conversion.fb_pixel_purchase',
+  'omni_purchase',
+]);
 
 // GET /api/ad-performance?level=campaign|adset|ad&from=&to=&account=
 export async function GET(request) {
@@ -173,7 +184,15 @@ function aggregateWithConsistentConversions(rows) {
 function findDominantConversionType(allActionArrays) {
   const typeSet = new Set();
   for (const actions of allActionArrays) for (const a of actions) typeSet.add(a.action_type);
-  for (const type of CONVERSION_PRIORITY) if (typeSet.has(type)) return type;
+
+  // If this ad has any purchase-type action, restrict to purchase types only.
+  // This prevents ads with 0 purchases but 5 add_to_carts from showing 5 results.
+  const hasPurchaseType = [...typeSet].some(t => PURCHASE_TYPES.has(t));
+  const typesToCheck = hasPurchaseType
+    ? ['purchase', 'offsite_conversion.fb_pixel_purchase', 'omni_purchase']
+    : CONVERSION_PRIORITY;
+
+  for (const type of typesToCheck) if (typeSet.has(type)) return type;
   return null;
 }
 
