@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { queryRows, queryOne, query } from '@/lib/db';
 
+export const dynamic = 'force-dynamic';
+
 // GET — list notifications
 export async function GET(request) {
   const { searchParams } = new URL(request.url);

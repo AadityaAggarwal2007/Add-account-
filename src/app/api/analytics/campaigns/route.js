@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { queryRows, queryOne } from '@/lib/db';
 import { fetchPeriodReach } from '@/lib/meta-api';
 
+export const dynamic = 'force-dynamic';
+
 // GET /api/analytics/campaigns — Optimized campaign table
 export async function GET(request) {
   const { searchParams } = new URL(request.url);

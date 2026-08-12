@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { queryOne, queryRows } from '@/lib/db';
 import { fetchAdSets, fetchInsights, fetchPeriodReach } from '@/lib/meta-api';
 
+export const dynamic = 'force-dynamic';
+
 // GET /api/analytics/campaign-detail?id=UUID&from=&to=
 export async function GET(request) {
   const { searchParams } = new URL(request.url);

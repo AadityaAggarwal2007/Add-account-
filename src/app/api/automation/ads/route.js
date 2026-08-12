@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { queryRows } from '@/lib/db';
 
+export const dynamic = 'force-dynamic';
+
 const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
 
 // GET /api/automation/ads — Fetch all ads across all accounts for rule targeting picker

@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { queryRows, queryOne } from '@/lib/db';
 
+export const dynamic = 'force-dynamic';
+
 // GET /api/debug — Shows raw database state for troubleshooting
 export async function GET() {
   try {

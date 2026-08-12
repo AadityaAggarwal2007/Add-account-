@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { queryRows, query } from '@/lib/db';
 import { detectSpam } from '@/lib/spam-keywords';
 
+export const dynamic = 'force-dynamic';
+
 const META_GRAPH_URL = 'https://graph.facebook.com/v18.0';
 const FB_FIELDS = 'id,message,from{name,id},created_time,like_count,comment_count,is_hidden,attachment';
 const IG_FIELDS = 'id,text,timestamp,from{id,username},like_count,hidden,replies{id}';

@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { queryOne, query } from '@/lib/db';
 
+export const dynamic = 'force-dynamic';
+
 // GET /api/settings/exchange-rate
 export async function GET() {
   try {

@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { queryRows } from '@/lib/db';
 import { fetchAdCreativeMedia } from '@/lib/meta-api';
 
+export const dynamic = 'force-dynamic';
+
 // GET /api/ad-performance/media?adId=META_AD_ID
 export async function GET(request) {
   const { searchParams } = new URL(request.url);

@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { queryRows, queryOne, query } from '@/lib/db';
 
+export const dynamic = 'force-dynamic';
+
 const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
 
 // GET /api/automation/paused — List all currently auto-paused ads
@@ -30,9 +32,20 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Paused ad not found' }, { status: 404 });
     }
 
-    const accounts = await queryRows(
-      `SELECT access_token FROM meta_accounts WHERE is_active = true`
-    );
+    // Try the stored account first (from metric_snapshot.accountId), then fall back to all
+    const storedAccountId = pausedRecord.metric_snapshot?.accountId;
+    let accounts;
+    if (storedAccountId) {
+      accounts = await queryRows(
+        `SELECT access_token FROM meta_accounts WHERE is_active = true AND meta_account_id = $1`,
+        [storedAccountId]
+      );
+    }
+    if (!accounts?.length) {
+      accounts = await queryRows(
+        `SELECT access_token FROM meta_accounts WHERE is_active = true`
+      );
+    }
 
     if (!accounts.length) return NextResponse.json({ error: 'No active account' }, { status: 400 });
 

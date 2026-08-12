@@ -170,22 +170,22 @@ export default function DashboardPage() {
   const dateFrom = format(dateRange.from, 'yyyy-MM-dd');
   const dateTo = format(dateRange.to, 'yyyy-MM-dd');
 
-  // Fetch overview data with caching
+  // Fetch overview data — always fetch fresh, use cache only as instant placeholder
   const fetchOverview = useCallback(async () => {
     const cacheKey = `ov_${dateFrom}_${dateTo}_${breakdown}_${selectedAccountId}`;
-    if (cacheRef.current[cacheKey]) {
-      const c = cacheRef.current[cacheKey];
-      setKpis(c.kpis); setChart(c.chart); setTrends(c.trends); setPerformance(c.performance);
+    const cached = cacheRef.current[cacheKey];
+    if (cached) {
+      setKpis(cached.kpis); setChart(cached.chart); setTrends(cached.trends); setPerformance(cached.performance);
     }
     try {
-      const res = await fetch(`/api/analytics/overview?from=${dateFrom}&to=${dateTo}&breakdown=${breakdown}${accountQueryParam}`);
+      const res = await fetch(`/api/analytics/overview?from=${dateFrom}&to=${dateTo}&breakdown=${breakdown}${accountQueryParam}`, { cache: 'no-store' });
       if (!res.ok) return;
       const data = await res.json();
       if (data.kpis) setKpis(data.kpis);
       if (data.chart) setChart(data.chart);
       if (data.trends) setTrends(data.trends);
       if (data.performance) setPerformance(data.performance);
-      cacheRef.current[cacheKey] = data;
+      cacheRef.current = { [cacheKey]: data };
     } catch {}
   }, [dateFrom, dateTo, breakdown, accountQueryParam, selectedAccountId]);
 
@@ -200,7 +200,7 @@ export default function DashboardPage() {
       if (debouncedSearch) params.set('search', debouncedSearch);
       if (perfFilter) params.set('performance', perfFilter);
       if (selectedAccountId !== 'all') params.set('account', selectedAccountId);
-      const res = await fetch(`/api/analytics/campaigns?${params}`);
+      const res = await fetch(`/api/analytics/campaigns?${params}`, { cache: 'no-store' });
       if (!res.ok) return;
       const data = await res.json();
       if (data.campaigns) setCampaigns(data.campaigns);

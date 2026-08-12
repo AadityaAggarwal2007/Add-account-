@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { queryRows, queryOne } from '@/lib/db';
 
+export const dynamic = 'force-dynamic';
+
 const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
 
 async function getAllPageTokens() {

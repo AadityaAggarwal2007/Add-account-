@@ -408,7 +408,7 @@ export async function fetchAdCreativeMedia(adId, accessToken) {
 // Conversion action types — STRICT priority order.
 // Meta Ads Manager shows "Results" as the FIRST matching type only.
 // We use exact matching (no .includes()) to prevent double-counting.
-const CONVERSION_PRIORITY = [
+export const CONVERSION_PRIORITY = [
   // Website pixel purchases first — matches Meta Ads Manager "Results" column
   // for purchase-objective campaigns (website purchases only, not omni/app)
   'purchase',
@@ -431,13 +431,13 @@ const CONVERSION_PRIORITY = [
 // Purchase-type action names — if ANY of these appear in the actions array
 // (even with value 0), we only count purchase types. This prevents falling
 // through to add_to_cart/lead for purchase-objective ads that got 0 purchases.
-const PURCHASE_TYPES = new Set([
+export const PURCHASE_TYPES = new Set([
   'purchase',
   'offsite_conversion.fb_pixel_purchase',
   'omni_purchase',
 ]);
 
-function extractConversions(actions) {
+export function extractConversions(actions) {
   if (!actions || !Array.isArray(actions)) return 0;
 
   // If this is a purchase-objective ad (has any purchase action in the array),
@@ -455,7 +455,7 @@ function extractConversions(actions) {
   return 0;
 }
 
-function extractConversionValue(actionValues) {
+export function extractConversionValue(actionValues) {
   if (!actionValues || !Array.isArray(actionValues)) return 0;
   for (const type of CONVERSION_PRIORITY) {
     const action = actionValues.find(a => a.action_type === type);

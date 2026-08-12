@@ -1,28 +1,10 @@
 import { NextResponse } from 'next/server';
 import { queryRows } from '@/lib/db';
-import { fetchInsights } from '@/lib/meta-api';
+import { fetchInsights, extractConversions, CONVERSION_PRIORITY, PURCHASE_TYPES } from '@/lib/meta-api';
+
+export const dynamic = 'force-dynamic';
 
 const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
-
-const CONVERSION_PRIORITY = [
-  // Website pixel purchases first — matches Meta Ads Manager "Results" column
-  'purchase', 'offsite_conversion.fb_pixel_purchase',
-  'lead', 'offsite_conversion.fb_pixel_lead',
-  'complete_registration', 'offsite_conversion.fb_pixel_complete_registration',
-  'add_to_cart', 'offsite_conversion.fb_pixel_add_to_cart',
-  'initiate_checkout', 'offsite_conversion.fb_pixel_initiate_checkout',
-  'onsite_conversion.messaging_conversation_started_7d',
-  // omni_purchase last — includes app/offline, inflates vs Meta Ads Manager
-  'omni_purchase', 'omni_add_to_cart',
-];
-
-// If ANY purchase action exists for an ad, only count purchase types.
-// Prevents add_to_cart from being counted for purchase-objective ads with 0 purchases.
-const PURCHASE_TYPES = new Set([
-  'purchase',
-  'offsite_conversion.fb_pixel_purchase',
-  'omni_purchase',
-]);
 
 // GET /api/ad-performance?level=campaign|adset|ad&from=&to=&account=
 export async function GET(request) {
@@ -202,10 +184,18 @@ function findDominantConversionType(allActionArrays) {
 }
 
 async function fetchAccountAdSets(accountId, accessToken) {
-  const res = await fetch(`${META_GRAPH_URL}/act_${accountId}/adsets?fields=id,name,status&limit=500&access_token=${accessToken}`);
-  if (!res.ok) return [];
-  const { data } = await res.json();
-  return (data || []).map(a => ({ id: a.id, name: a.name, status: a.status }));
+  const allAdSets = [];
+  let url = `${META_GRAPH_URL}/act_${accountId}/adsets?fields=id,name,status&limit=500&access_token=${accessToken}`;
+
+  while (url) {
+    const res = await fetch(url);
+    if (!res.ok) break;
+    const json = await res.json();
+    if (json.data) allAdSets.push(...json.data);
+    url = json.paging?.next || null;
+  }
+
+  return allAdSets.map(a => ({ id: a.id, name: a.name, status: a.status }));
 }
 
 async function fetchAccountAds(accountId, accessToken) {

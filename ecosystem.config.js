@@ -11,6 +11,7 @@ module.exports = {
       env_production: {
         NODE_ENV: 'production',
         PORT: 3001,           // Tracker is on 3000, Add ERP on 3001
+        TZ: 'Asia/Kolkata',   // All date calculations use IST consistently
       },
       autorestart: true,
       watch: false,

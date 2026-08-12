@@ -31,12 +31,13 @@ export async function POST(request) {
 
 async function buildReport() {
   const nowMs    = Date.now();
-  const istMs    = nowMs + (5.5 * 60 * 60 * 1000);
-  const todayStr = new Date(istMs).toISOString().split('T')[0];
+  const now      = new Date();
+  // With TZ=Asia/Kolkata set in ecosystem.config.js, local dates are IST
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
   const [cronData, todayMetrics, pausedLast5Min, currentlyPaused] = await Promise.all([
     queryOne(`SELECT value FROM system_settings WHERE key = 'cron_health'`),
-    queryRows(`SELECT spend, conversions FROM metrics WHERE date = $1`, [todayStr]),
+    queryRows(`SELECT spend, conversions FROM metrics WHERE entity_type = 'campaign' AND date = $1`, [todayStr]),
     queryRows(
       `SELECT entity_name, rule_name, condition_snapshot, created_at FROM automation_logs
        WHERE action_type = 'pause_ad' AND status = 'executed' AND created_at >= $1

@@ -17,7 +17,8 @@
 //  ✓ Hard rate limit — max 195 Meta API calls/hour (ban prevention)
 // =============================================================
 
-import { query, queryOne, queryRows } from '@/lib/db';
+import { query, queryOne, queryRows, withTransaction } from '@/lib/db';
+import { extractConversions } from '@/lib/meta-api';
 
 const META_GRAPH_URL = 'https://graph.facebook.com/v22.0';
 const META_BATCH_URL = 'https://graph.facebook.com/';
@@ -26,51 +27,71 @@ const META_BATCH_URL = 'https://graph.facebook.com/';
 const META_BATCH_SIZE = 50;
 
 // ── Hard rate limit: max Meta API HTTP calls per hour ───────
+// Uses atomic DB operations (SELECT FOR UPDATE) so PM2 cluster workers coordinate.
 const RATE_LIMIT_MAX  = 195;
 const RATE_LIMIT_KEY  = 'meta_api_rate';
 const HOUR_MS         = 60 * 60 * 1000;
 
-// In-process counter for the current invocation
 let _rateCount    = 0;
 let _rateBudget   = RATE_LIMIT_MAX;
-let _rateWindowStart = null;
 
 async function loadRateBudget() {
   try {
-    const row = await queryOne(
-      `SELECT value FROM system_settings WHERE key = $1`,
-      [RATE_LIMIT_KEY]
-    );
+    const result = await withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `SELECT value FROM system_settings WHERE key = $1 FOR UPDATE`,
+        [RATE_LIMIT_KEY]
+      );
+      const row = rows[0];
 
-    if (row?.value) {
-      const { window_start, count } = row.value;
-      const age = Date.now() - new Date(window_start).getTime();
-      if (age < HOUR_MS) {
-        _rateBudget = Math.max(0, RATE_LIMIT_MAX - (count || 0));
-        _rateCount  = 0;
-        console.log(`[RateLimit] Budget loaded: ${_rateBudget} calls remaining this hour (${count || 0} used)`);
-        return;
+      if (row?.value) {
+        const { window_start, count } = row.value;
+        const age = Date.now() - new Date(window_start).getTime();
+        if (age < HOUR_MS) {
+          return { budget: Math.max(0, RATE_LIMIT_MAX - (count || 0)), count: count || 0 };
+        }
       }
-    }
-    // New hour window — reset
-    _rateBudget = RATE_LIMIT_MAX;
+      // New hour window — reset counter atomically
+      const now = new Date().toISOString();
+      await client.query(
+        `INSERT INTO system_settings (key, value, updated_at)
+         VALUES ($1, $2, now())
+         ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()`,
+        [RATE_LIMIT_KEY, JSON.stringify({ window_start: now, count: 0 })]
+      );
+      return { budget: RATE_LIMIT_MAX, count: 0 };
+    });
+
+    _rateBudget = result.budget;
     _rateCount  = 0;
-    console.log(`[RateLimit] New hour window — full budget of ${RATE_LIMIT_MAX} calls`);
+    console.log(`[RateLimit] Budget loaded: ${_rateBudget} calls remaining this hour (${result.count} used)`);
   } catch {
     _rateBudget = RATE_LIMIT_MAX;
     _rateCount  = 0;
   }
 }
 
-async function saveRateCount(totalUsedThisHour) {
+async function saveRateCount() {
   try {
-    await query(
-      `INSERT INTO system_settings (key, value, updated_at)
-       VALUES ($1, $2, now())
-       ON CONFLICT (key) DO UPDATE
-         SET value = $2, updated_at = now()`,
-      [RATE_LIMIT_KEY, JSON.stringify({ window_start: _rateWindowStart, count: totalUsedThisHour })]
-    );
+    await withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `SELECT value FROM system_settings WHERE key = $1 FOR UPDATE`,
+        [RATE_LIMIT_KEY]
+      );
+      const existing = rows[0]?.value || {};
+      const windowStart = existing.window_start || new Date().toISOString();
+      const age = Date.now() - new Date(windowStart).getTime();
+      const prevCount = age < HOUR_MS ? (existing.count || 0) : 0;
+      const newWindowStart = age < HOUR_MS ? windowStart : new Date().toISOString();
+      const totalUsed = prevCount + _rateCount;
+
+      await client.query(
+        `INSERT INTO system_settings (key, value, updated_at)
+         VALUES ($1, $2, now())
+         ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()`,
+        [RATE_LIMIT_KEY, JSON.stringify({ window_start: newWindowStart, count: totalUsed })]
+      );
+    });
   } catch { /* non-critical */ }
 }
 
@@ -84,15 +105,6 @@ async function trackApiCall(label = '') {
     console.log(`[RateLimit] ${_rateCount} calls this invocation, ${_rateBudget} remaining in hour`);
   }
 }
-
-const CONVERSION_PRIORITY = [
-  'purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase',
-  'lead', 'offsite_conversion.fb_pixel_lead',
-  'complete_registration', 'offsite_conversion.fb_pixel_complete_registration',
-  'add_to_cart', 'omni_add_to_cart', 'offsite_conversion.fb_pixel_add_to_cart',
-  'initiate_checkout', 'offsite_conversion.fb_pixel_initiate_checkout',
-  'onsite_conversion.messaging_conversation_started_7d',
-];
 
 const DEFAULT_MIN_SPEND = 0.50;
 
@@ -143,22 +155,42 @@ export async function evaluateLiveRules() {
 
   // Cache for live data fetches by scope and period
   const liveDataCache = {};
+  const statusCache = {};
   const checkedEntities = new Set();
+
+  async function getStatusesForScope(scope) {
+    if (statusCache[scope]) return statusCache[scope];
+    const type = scope === 'ad' ? 'ads' : 'adsets';
+    const allStatuses = {};
+
+    await Promise.all(accounts.map(async (account) => {
+      try {
+        const statuses = await fetchEntityStatuses(account.meta_account_id, account.access_token, type);
+        for (const [id, info] of Object.entries(statuses)) {
+          allStatuses[id] = { ...info, accountId: account.meta_account_id, accessToken: account.access_token };
+        }
+      } catch (err) {
+        console.error(`[LiveMonitor] Failed to fetch statuses for ${account.name} (${scope}):`, err.message);
+      }
+    }));
+
+    statusCache[scope] = allStatuses;
+    return allStatuses;
+  }
 
   async function getLiveDataForScopeAndPeriod(scope, period) {
     const cacheKey = `${scope}_${period}`;
     if (liveDataCache[cacheKey]) return liveDataCache[cacheKey];
 
     const dataMap = {};
-    const type = scope === 'ad' ? 'ads' : 'adsets';
     const insightsLevel = scope === 'ad' ? 'ad' : 'adset';
+
+    // Fetch statuses once per scope (cached), insights per period
+    const statuses = await getStatusesForScope(scope);
 
     await Promise.all(accounts.map(async (account) => {
       try {
-        const [insights, statuses] = await Promise.all([
-          fetchAllLiveInsights(account.meta_account_id, account.access_token, insightsLevel, period),
-          fetchEntityStatuses(account.meta_account_id, account.access_token, type),
-        ]);
+        const insights = await fetchAllLiveInsights(account.meta_account_id, account.access_token, insightsLevel, period);
         mergeInsightsAndStatuses(insights, statuses, dataMap, account);
       } catch (err) {
         console.error(`[LiveMonitor] Failed to fetch for ${account.name} (${scope}, ${period}):`, err.message);
@@ -169,19 +201,30 @@ export async function evaluateLiveRules() {
     return dataMap;
   }
 
-  // Evaluate each rule
+  // Evaluate each rule — fetch data for ALL periods used by the rule's conditions
   const results = [];
 
   for (const rule of rules) {
     try {
-      const period = rule.conditions?.[0]?.period || 'today';
-      const dataMap = await getLiveDataForScopeAndPeriod(rule.scope, period);
+      const conditions = rule.conditions || [];
+      const periods = [...new Set(conditions.map(c => c.period || 'today'))];
 
-      for (const entityId of Object.keys(dataMap)) {
-        checkedEntities.add(`${rule.scope}_${entityId}`);
+      // Fetch data for every period this rule needs
+      const periodDataMaps = {};
+      for (const period of periods) {
+        const dataMap = await getLiveDataForScopeAndPeriod(rule.scope, period);
+        periodDataMaps[period] = dataMap;
+
+        for (const entityId of Object.keys(dataMap)) {
+          checkedEntities.add(`${rule.scope}_${entityId}`);
+        }
       }
 
-      const ruleResults = await evaluateRuleAgainstLiveData(rule, dataMap, pausedMap);
+      // Use the primary period (first condition) for spend filtering and entity enumeration
+      const primaryPeriod = periods[0];
+      const primaryDataMap = periodDataMaps[primaryPeriod];
+
+      const ruleResults = await evaluateRuleAgainstLiveData(rule, primaryDataMap, pausedMap, periodDataMaps);
       results.push({ rule: rule.name, ruleId: rule.id, scope: rule.scope, ...ruleResults });
     } catch (err) {
       console.error(`[LiveMonitor] Rule "${rule.name}" error:`, err.message);
@@ -194,17 +237,9 @@ export async function evaluateLiveRules() {
   const totalResumed = results.reduce((s, r) => s + (r.resumed || 0), 0);
   const totalSkipped = results.reduce((s, r) => s + (r.skippedMinSpend || 0), 0);
 
-  // Persist updated rate count back to DB
-  const prevRate = await queryOne(
-    `SELECT value FROM system_settings WHERE key = $1`,
-    [RATE_LIMIT_KEY]
-  );
-  const prevCount = prevRate?.value?.count || 0;
-  const prevWindowStart = prevRate?.value?.window_start;
-  const windowAge = prevWindowStart ? Date.now() - new Date(prevWindowStart).getTime() : HOUR_MS + 1;
-  const usedThisHour = windowAge < HOUR_MS ? prevCount + _rateCount : _rateCount;
-  await saveRateCount(usedThisHour);
-  console.log(`[RateLimit] Saved: ${usedThisHour}/${RATE_LIMIT_MAX} calls used this hour`);
+  // Persist updated rate count atomically (safe with PM2 cluster mode)
+  await saveRateCount();
+  console.log(`[RateLimit] Saved: ${_rateCount} calls this invocation, budget remaining: ${_rateBudget}`);
 
   console.log(
     `[LiveMonitor] Done in ${elapsed}ms — ` +
@@ -230,8 +265,8 @@ export async function evaluateLiveRules() {
     resumed: totalResumed,
     skipped: totalSkipped,
     elapsed_ms: elapsed,
-    api_calls_this_hour: usedThisHour,
-    api_budget_remaining: RATE_LIMIT_MAX - usedThisHour,
+    api_calls_this_invocation: _rateCount,
+    api_budget_remaining: _rateBudget,
     diagnostics,
     results: results.map(r => ({
       rule: r.rule, ruleId: r.ruleId, scope: r.scope,
@@ -247,7 +282,7 @@ export async function evaluateLiveRules() {
 // RULE EVALUATION — Classify then Batch Act
 // =============================================================
 
-async function evaluateRuleAgainstLiveData(rule, liveData, pausedMap) {
+async function evaluateRuleAgainstLiveData(rule, liveData, pausedMap, periodDataMaps = null) {
   let paused = 0, resumed = 0, skippedMinSpend = 0;
   let checked = 0, skippedNotActive = 0;
   const breachingAds = [];
@@ -275,8 +310,13 @@ async function evaluateRuleAgainstLiveData(rule, liveData, pausedMap) {
       continue;
     }
 
+    // Evaluate each condition against its OWN period's data
     const allConditionsMet = conditions.every(cond => {
-      const value = getMetricValue(entity, cond.metric);
+      const condPeriod = cond.period || 'today';
+      const periodEntity = periodDataMaps?.[condPeriod]?.[entityId];
+      // Fall back to primary period entity if period data not available
+      const target = periodEntity || entity;
+      const value = getMetricValue(target, cond.metric);
       return evaluateCondition(value, cond.operator, parseFloat(cond.value));
     });
 
@@ -437,14 +477,14 @@ async function bulkSavePauses(rule, entities, isKillSwitch) {
     [ids]
   );
 
-  // 2. Bulk insert paused tracking
+  // 2. Bulk insert paused tracking (include accountId in snapshot for targeted resume)
   const pauseValues = entities.map(({ entityId, entity }) => ({
     ad_external_id: entityId,
     ad_name: entity.entityName,
     rule_id: rule.id,
     rule_name: rule.name,
     reason: isKillSwitch ? 'kill_switch' : 'threshold',
-    metric_snapshot: JSON.stringify(buildSnapshot(entity)),
+    metric_snapshot: JSON.stringify({ ...buildSnapshot(entity), accountId: entity.accountId }),
     paused_at: now,
     is_paused: true,
   }));
@@ -602,11 +642,12 @@ async function retryWithBackoff(fn, maxRetries = 3) {
 
 function mergeInsightsAndStatuses(insights, statuses, dataMap, account) {
   for (const item of insights) {
+    const statusInfo = statuses[item.entityId];
     dataMap[item.entityId] = {
       ...item,
-      status:      statuses[item.entityId]?.status || 'UNKNOWN',
-      accountId:   account.meta_account_id,
-      accessToken: account.access_token,
+      status:      statusInfo?.status || 'UNKNOWN',
+      accountId:   statusInfo?.accountId || account.meta_account_id,
+      accessToken: statusInfo?.accessToken || account.access_token,
     };
   }
 
@@ -617,25 +658,26 @@ function mergeInsightsAndStatuses(insights, statuses, dataMap, account) {
         spend: 0, results: 0, cpr: 0, impressions: 0, clicks: 0,
         cpc: 0, ctr: 0, cpm: 0,
         status:      info.status || 'UNKNOWN',
-        accountId:   account.meta_account_id,
-        accessToken: account.access_token,
+        accountId:   info.accountId || account.meta_account_id,
+        accessToken: info.accessToken || account.access_token,
       };
     }
   }
 }
 
 function getDateRangeForPeriod(period) {
+  // With TZ=Asia/Kolkata set in ecosystem.config.js, toLocaleDateString
+  // returns IST dates without manual offset math.
   const now = new Date();
-  const istMs = now.getTime() + (5.5 * 60 * 60 * 1000);
-  const todayStr = new Date(istMs).toISOString().split('T')[0];
+  const todayStr = formatLocalDate(now);
 
   if (period === 'today') {
     return { since: todayStr, until: todayStr };
   }
 
   if (period === 'yesterday') {
-    const yesterday = new Date(istMs - (24 * 60 * 60 * 1000)).toISOString().split('T')[0];
-    return { since: yesterday, until: yesterday };
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    return { since: formatLocalDate(yesterday), until: formatLocalDate(yesterday) };
   }
 
   let days = 1;
@@ -644,8 +686,15 @@ function getDateRangeForPeriod(period) {
   else if (period === 'last_14_days') days = 14;
   else if (period === 'last_30_days') days = 30;
 
-  const sinceDate = new Date(istMs - ((days - 1) * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
-  return { since: sinceDate, until: todayStr };
+  const sinceDate = new Date(now.getTime() - (days - 1) * 24 * 60 * 60 * 1000);
+  return { since: formatLocalDate(sinceDate), until: todayStr };
+}
+
+function formatLocalDate(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 async function fetchAllLiveInsights(accountId, accessToken, level = 'ad', period = 'today') {
@@ -727,15 +776,6 @@ async function fetchEntityStatuses(accountId, accessToken, type = 'ads') {
 // =============================================================
 // UTILITIES
 // =============================================================
-
-function extractConversions(actions) {
-  if (!actions || !Array.isArray(actions)) return 0;
-  for (const type of CONVERSION_PRIORITY) {
-    const action = actions.find(a => a.action_type === type);
-    if (action) return parseFloat(action.value || '0');
-  }
-  return 0;
-}
 
 function buildSnapshot(entity) {
   return {

@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { queryRows, queryOne } from '@/lib/db';
 import { fetchPeriodReach } from '@/lib/meta-api';
 
+export const dynamic = 'force-dynamic';
+
 // GET /api/analytics/overview — Advanced KPI + Chart data
 // Optimized: 3 queries total instead of N+1
 export async function GET(request) {
