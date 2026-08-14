@@ -304,8 +304,7 @@ async function evaluateRuleAgainstLiveData(rule, liveData, pausedMap, periodData
     checked++;
     const isPausedByUs = !!pausedMap[entityId];
 
-    const spendingWithZeroResults = entity.spend > 0 && entity.results === 0;
-    if (entity.spend < minSpend && !isPausedByUs && !spendingWithZeroResults) {
+    if (entity.spend < minSpend && !isPausedByUs) {
       skippedMinSpend++;
       continue;
     }
