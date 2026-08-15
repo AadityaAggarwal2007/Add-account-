@@ -702,7 +702,7 @@ async function fetchAllLiveInsights(accountId, accessToken, level = 'ad', period
   const idField   = level === 'ad' ? 'ad_id'    : 'adset_id';
   const nameField = level === 'ad' ? 'ad_name'  : 'adset_name';
 
-  const fields    = `${idField},${nameField},spend,impressions,clicks,actions`;
+  const fields    = `${idField},${nameField},spend,impressions,clicks,actions,objective`;
   const timeRange = encodeURIComponent(JSON.stringify({ since, until }));
 
   const spendFilter = encodeURIComponent(
@@ -735,14 +735,15 @@ async function fetchAllLiveInsights(accountId, accessToken, level = 'ad', period
     const spend       = parseFloat(row.spend || '0');
     const impressions = parseInt(row.impressions || '0');
     const clicks      = parseInt(row.clicks || '0');
-    const results     = extractConversions(row.actions);
+    const objective   = row.objective || '';
+    const results     = extractConversions(row.actions, objective);
 
     const cpc = clicks      > 0 ? +(spend / clicks).toFixed(4)              : 0;
     const ctr = impressions > 0 ? +((clicks / impressions) * 100).toFixed(4) : 0;
     const cpm = impressions > 0 ? +((spend / impressions) * 1000).toFixed(4) : 0;
     const cpr = results > 0 ? +(spend / results).toFixed(2) : (spend > 0 ? 999999 : 0);
 
-    return { entityId: row[idField], entityName: row[nameField], spend, impressions, clicks, results, cpc, ctr, cpm, cpr };
+    return { entityId: row[idField], entityName: row[nameField], spend, impressions, clicks, results, cpc, ctr, cpm, cpr, objective };
   });
 }
 

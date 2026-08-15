@@ -169,6 +169,7 @@ export async function fetchInsights(accountId, accessToken, dateFrom, dateTo, le
     'impressions', 'clicks', 'inline_link_clicks', 'spend',
     'actions', 'action_values',
     'reach', 'frequency', 'cpc', 'cpm', 'ctr',
+    'objective',
   ].join(',');
 
   const allData = [];
@@ -195,7 +196,7 @@ export async function fetchInsights(accountId, accessToken, dateFrom, dateTo, le
 
   return allData.map(row => {
     // Extract conversions from multiple possible action types
-    const conversions = extractConversions(row.actions);
+    const conversions = extractConversions(row.actions, row.objective);
     const conversionValue = extractConversionValue(row.action_values);
     // Use clicks, or fall back to inline_link_clicks
     const clicks = parseInt(row.clicks || row.inline_link_clicks || '0');
@@ -437,14 +438,18 @@ export const PURCHASE_TYPES = new Set([
   'omni_purchase',
 ]);
 
-export function extractConversions(actions) {
+const PURCHASE_OBJECTIVES = new Set([
+  'OUTCOME_SALES', 'CONVERSIONS', 'PRODUCT_CATALOG_SALES',
+]);
+
+export function extractConversions(actions, objective) {
   if (!actions || !Array.isArray(actions)) return 0;
 
-  // If this is a purchase-objective ad (has any purchase action in the array),
-  // ONLY count purchase conversions — matches Meta Ads Manager "Results" column.
-  // Without this guard, ads with 0 purchases but 5 add_to_carts would show 5 results.
+  const isPurchaseObjective = objective && PURCHASE_OBJECTIVES.has(objective);
   const hasPurchaseType = actions.some(a => PURCHASE_TYPES.has(a.action_type));
-  const typesToCheck = hasPurchaseType
+
+  const purchaseOnly = isPurchaseObjective || hasPurchaseType;
+  const typesToCheck = purchaseOnly
     ? ['purchase', 'offsite_conversion.fb_pixel_purchase', 'omni_purchase']
     : CONVERSION_PRIORITY;
 
