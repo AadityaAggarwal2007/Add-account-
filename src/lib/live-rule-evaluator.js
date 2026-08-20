@@ -108,6 +108,11 @@ async function trackApiCall(label = '') {
 
 const DEFAULT_MIN_SPEND = 0.50;
 
+// Cooldown: don't resume an ad until this many minutes after it was paused.
+// Prevents flip-flopping where an ad is paused, spend stops, conditions clear,
+// and it gets immediately resumed only to breach again next cycle.
+const RESUME_COOLDOWN_MINUTES = 60;
+
 
 // =============================================================
 // MAIN ENTRY
@@ -119,9 +124,11 @@ export async function evaluateLiveRules() {
   _rateWindowStart = new Date().toISOString();
   await loadRateBudget();
 
-  if (_rateBudget <= 0) {
-    console.warn(`[LiveMonitor] ⛔ Rate limit hit — skipping cycle (${RATE_LIMIT_MAX} calls/hr cap)`);
-    return { evaluated: 0, message: `Rate limit reached (${RATE_LIMIT_MAX}/hr). Resets next hour.`, rateLimited: true };
+  // Reserve 10 calls so there's always budget left for a pause action
+  const RESERVE_BUDGET = 10;
+  if (_rateBudget <= RESERVE_BUDGET) {
+    console.warn(`[LiveMonitor] ⛔ Budget too low (${_rateBudget} remaining, reserve=${RESERVE_BUDGET}) — skipping cycle`);
+    return { evaluated: 0, message: `Budget too low (${_rateBudget}/${RATE_LIMIT_MAX}). Reserving for actions.`, rateLimited: true };
   }
 
   // Load active rules (ad + ad_set scope only)
@@ -327,6 +334,12 @@ async function evaluateRuleAgainstLiveData(rule, liveData, pausedMap, periodData
     } else if (!allConditionsMet && isPausedByUs && !isKillSwitch) {
       const pauseRecord = pausedMap[entityId];
       if (pauseRecord.rule_id !== rule.id) continue;
+
+      // Cooldown: don't resume until RESUME_COOLDOWN_MINUTES after pause
+      const pausedAt = new Date(pauseRecord.paused_at).getTime();
+      const cooldownMs = (rule.resume_cooldown_minutes || RESUME_COOLDOWN_MINUTES) * 60 * 1000;
+      if (Date.now() - pausedAt < cooldownMs) continue;
+
       toResume.push({ entityId, entity });
     }
   }
